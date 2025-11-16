@@ -1,0 +1,479 @@
+// server.c  -- Tetris online backend (không d? h?a)
+// Biên d?ch (Linux / WSL):  gcc server.c -o server
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/select.h>
+#include <netinet/in.h>
+
+#define MAX_CLIENTS   64
+#define MAX_ROOMS     32
+#define BUF_SIZE      4096
+#define USERNAME_LEN  32
+#define PASSWORD_LEN  32
+#define MAX_ACCOUNTS  128
+
+typedef struct {
+    char username[USERNAME_LEN];
+    char password[PASSWORD_LEN];
+} Account;
+
+static Account accounts[MAX_ACCOUNTS];
+static int account_count = 0;
+static const char *ACCOUNTS_FILE = "accounts.txt";
+
+typedef struct {
+    int  used;
+    int  fd;
+    char recv_buf[BUF_SIZE];
+    int  recv_len;
+    char username[USERNAME_LEN];
+    int  logged_in;
+    int  room_id; // -1 n?u chua ? phòng nào
+} Client;
+
+typedef struct {
+    int used;
+    int id;               // roomId
+    int clients[4];       // index trong m?ng clients[]
+    int num_players;
+    int playing;          // 0: ch?, 1: dang choi
+} Room;
+
+static Client clients[MAX_CLIENTS];
+static Room   rooms[MAX_ROOMS];
+static int    next_room_id = 1;
+
+/* ===================== helpers chung ===================== */
+
+static void trim_newline(char *s) {
+    size_t len = strlen(s);
+    while (len > 0 && (s[len-1] == '\n' || s[len-1] == '\r')) {
+        s[len-1] = '\0';
+        len--;
+    }
+}
+
+/* ---------- Tài kho?n ---------- */
+
+static void load_accounts() {
+    FILE *f = fopen(ACCOUNTS_FILE, "r");
+    if (!f) return; // chua có file
+
+    char u[USERNAME_LEN], p[PASSWORD_LEN];
+    while (fscanf(f, "%31s %31s", u, p) == 2) {
+        if (account_count >= MAX_ACCOUNTS) break;
+        strncpy(accounts[account_count].username, u, USERNAME_LEN);
+        accounts[account_count].username[USERNAME_LEN-1] = '\0';
+        strncpy(accounts[account_count].password, p, PASSWORD_LEN);
+        accounts[account_count].password[PASSWORD_LEN-1] = '\0';
+        account_count++;
+    }
+    fclose(f);
+}
+
+static int find_account(const char *username) {
+    for (int i = 0; i < account_count; ++i) {
+        if (strcmp(accounts[i].username, username) == 0) return i;
+    }
+    return -1;
+}
+
+// tr? 0 = ok, -2 = dã t?n t?i, -1 = h?t ch?
+static int add_account(const char *username, const char *password) {
+    if (account_count >= MAX_ACCOUNTS) return -1;
+    if (find_account(username) != -1)  return -2;
+
+    strncpy(accounts[account_count].username, username, USERNAME_LEN);
+    accounts[account_count].username[USERNAME_LEN-1] = '\0';
+    strncpy(accounts[account_count].password, password, PASSWORD_LEN);
+    accounts[account_count].password[PASSWORD_LEN-1] = '\0';
+    account_count++;
+
+    FILE *f = fopen(ACCOUNTS_FILE, "a");
+    if (f) {
+        fprintf(f, "%s %s\n", username, password);
+        fclose(f);
+    }
+    return 0;
+}
+
+/* ---------- Kh?i t?o client / room ---------- */
+
+static void init_clients() {
+    for (int i = 0; i < MAX_CLIENTS; ++i) {
+        clients[i].used       = 0;
+        clients[i].fd         = -1;
+        clients[i].recv_len   = 0;
+        clients[i].logged_in  = 0;
+        clients[i].room_id    = -1;
+        clients[i].username[0]= '\0';
+    }
+}
+
+static void init_rooms() {
+    for (int i = 0; i < MAX_ROOMS; ++i) {
+        rooms[i].used        = 0;
+        rooms[i].id          = 0;
+        rooms[i].num_players = 0;
+        rooms[i].playing     = 0;
+        for (int j = 0; j < 4; ++j) rooms[i].clients[j] = -1;
+    }
+}
+
+/* ---------- G?i / broadcast ---------- */
+
+static void send_to_client(int idx, const char *msg) {
+    if (!clients[idx].used) return;
+    size_t len = strlen(msg);
+    send(clients[idx].fd, msg, len, 0);   // don gi?n, b? qua l?i
+}
+
+static void broadcast_room(int room_index, const char *msg) {
+    if (!rooms[room_index].used) return;
+    for (int i = 0; i < rooms[room_index].num_players; ++i) {
+        int ci = rooms[room_index].clients[i];
+        if (ci >= 0 && clients[ci].used) send_to_client(ci, msg);
+    }
+}
+
+static int find_empty_client_slot() {
+    for (int i = 0; i < MAX_CLIENTS; ++i)
+        if (!clients[i].used) return i;
+    return -1;
+}
+
+/* ---------- R?i phòng / disconnect ---------- */
+
+static void remove_client_from_room(int client_index) {
+    int rid = clients[client_index].room_id;
+    if (rid < 0) return;
+
+    int rindex = -1;
+    for (int i = 0; i < MAX_ROOMS; ++i)
+        if (rooms[i].used && rooms[i].id == rid) { rindex = i; break; }
+
+    if (rindex < 0) {
+        clients[client_index].room_id = -1;
+        return;
+    }
+
+    Room *r = &rooms[rindex];
+    for (int i = 0; i < r->num_players; ++i) {
+        if (r->clients[i] == client_index) {
+            for (int j = i; j < r->num_players - 1; ++j)
+                r->clients[j] = r->clients[j+1];
+            r->num_players--;
+            r->clients[r->num_players] = -1;
+            break;
+        }
+    }
+    clients[client_index].room_id = -1;
+
+    if (r->num_players == 0) {
+        r->used = 0;
+        r->id   = 0;
+        r->playing = 0;
+    }
+}
+
+static void disconnect_client(int idx) {
+    if (!clients[idx].used) return;
+    printf("Client %d (%s) disconnected\n", idx,
+           clients[idx].logged_in ? clients[idx].username : "guest");
+
+    remove_client_from_room(idx);
+    close(clients[idx].fd);
+    clients[idx].used      = 0;
+    clients[idx].fd        = -1;
+    clients[idx].recv_len  = 0;
+    clients[idx].logged_in = 0;
+    clients[idx].username[0]= '\0';
+}
+
+/* ---------- Qu?n lý phòng ---------- */
+
+static int create_room_for_client(int client_idx) {
+    int slot = -1;
+    for (int i = 0; i < MAX_ROOMS; ++i)
+        if (!rooms[i].used) { slot = i; break; }
+
+    if (slot < 0) return -1;
+
+    Room *r = &rooms[slot];
+    r->used        = 1;
+    r->id          = next_room_id++;
+    r->num_players = 1;
+    r->playing     = 0;
+    for (int i = 0; i < 4; ++i) r->clients[i] = -1;
+    r->clients[0]  = client_idx;
+
+    clients[client_idx].room_id = r->id;
+    return r->id;
+}
+
+static int find_room_by_id(int room_id) {
+    for (int i = 0; i < MAX_ROOMS; ++i)
+        if (rooms[i].used && rooms[i].id == room_id) return i;
+    return -1;
+}
+
+static int join_room(int client_idx, int room_id) {
+    int rindex = find_room_by_id(room_id);
+    if (rindex < 0) return -1;
+
+    Room *r = &rooms[rindex];
+    if (r->num_players >= 4) return -2;
+
+    // tránh thêm trùng
+    for (int i = 0; i < r->num_players; ++i)
+        if (r->clients[i] == client_idx) return 0;
+
+    r->clients[r->num_players++] = client_idx;
+    clients[client_idx].room_id = room_id;
+    return 0;
+}
+
+static void send_room_list(int client_idx) {
+    send_to_client(client_idx, "ROOM_LIST_BEGIN\n");
+    for (int i = 0; i < MAX_ROOMS; ++i) {
+        if (!rooms[i].used) continue;
+        char line[128];
+        snprintf(line, sizeof(line), "ROOM %d %d\n",
+                 rooms[i].id, rooms[i].num_players);
+        send_to_client(client_idx, line);
+    }
+    send_to_client(client_idx, "ROOM_LIST_END\n");
+}
+
+/* ===================== X? lý l?nh t? client ===================== */
+
+static void handle_command(int cindex, char *line) {
+    trim_newline(line);
+    printf("From client %d: %s\n", cindex, line);
+
+    char cmd[32];
+    if (sscanf(line, "%31s", cmd) != 1) return;
+
+    if (strcmp(cmd, "REGISTER") == 0) {
+        char user[USERNAME_LEN], pass[PASSWORD_LEN];
+        if (sscanf(line, "REGISTER %31s %31s", user, pass) != 2) {
+            send_to_client(cindex, "REGISTER_FAIL Invalid_format\n");
+            return;
+        }
+        int r = add_account(user, pass);
+        if (r == -2)      send_to_client(cindex, "REGISTER_FAIL Username_exists\n");
+        else if (r != 0)  send_to_client(cindex, "REGISTER_FAIL Internal_error\n");
+        else              send_to_client(cindex, "REGISTER_OK\n");
+
+    } else if (strcmp(cmd, "LOGIN") == 0) {
+        char user[USERNAME_LEN], pass[PASSWORD_LEN];
+        if (sscanf(line, "LOGIN %31s %31s", user, pass) != 2) {
+            send_to_client(cindex, "LOGIN_FAIL Invalid_format\n");
+            return;
+        }
+        int idx = find_account(user);
+        if (idx < 0 || strcmp(accounts[idx].password, pass) != 0) {
+            send_to_client(cindex, "LOGIN_FAIL Wrong_credentials\n");
+            return;
+        }
+        clients[cindex].logged_in = 1;
+        strncpy(clients[cindex].username, user, USERNAME_LEN);
+        clients[cindex].username[USERNAME_LEN-1] = '\0';
+        send_to_client(cindex, "LOGIN_OK\n");
+
+    } else if (strcmp(cmd, "CREATE_ROOM") == 0) {
+        if (!clients[cindex].logged_in) {
+            send_to_client(cindex, "ERROR Not_logged_in\n");
+            return;
+        }
+        int rid = create_room_for_client(cindex);
+        if (rid < 0)      send_to_client(cindex, "ERROR Cannot_create_room\n");
+        else {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "ROOM_CREATED %d\n", rid);
+            send_to_client(cindex, buf);
+        }
+
+    } else if (strcmp(cmd, "LIST_ROOMS") == 0) {
+        send_room_list(cindex);
+
+    } else if (strcmp(cmd, "JOIN_ROOM") == 0) {
+        int rid;
+        if (sscanf(line, "JOIN_ROOM %d", &rid) != 1) {
+            send_to_client(cindex, "JOIN_FAIL Invalid_format\n");
+            return;
+        }
+        int r = join_room(cindex, rid);
+        if (r == -1)      send_to_client(cindex, "JOIN_FAIL No_such_room\n");
+        else if (r == -2) send_to_client(cindex, "JOIN_FAIL Room_full\n");
+        else {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "JOIN_OK %d\n", rid);
+            send_to_client(cindex, buf);
+        }
+
+    } else if (strcmp(cmd, "LEAVE_ROOM") == 0) {
+        remove_client_from_room(cindex);
+        send_to_client(cindex, "LEFT_ROOM\n");
+
+    } else if (strcmp(cmd, "GAME_SCORE") == 0) {
+        int score = 0;
+        if (sscanf(line, "GAME_SCORE %d", &score) != 1) {
+            send_to_client(cindex, "ERROR Invalid_score_format\n");
+            return;
+        }
+        int rid = clients[cindex].room_id;
+        if (rid < 0) {
+            send_to_client(cindex, "ERROR Not_in_room\n");
+            return;
+        }
+        int rindex = find_room_by_id(rid);
+        if (rindex < 0) return;
+        char msg[128];
+        snprintf(msg, sizeof(msg), "SCORE_UPDATE %s %d\n",
+                 clients[cindex].username[0] ? clients[cindex].username : "guest",
+                 score);
+        broadcast_room(rindex, msg);
+
+    } else {
+        send_to_client(cindex, "ERROR Unknown_command\n");
+    }
+}
+
+/* Tách buffer theo dòng (x? lý truy?n dòng) */
+static void process_client_buffer(int idx) {
+    Client *c = &clients[idx];
+    int start = 0;
+    for (int i = 0; i < c->recv_len; ++i) {
+        if (c->recv_buf[i] == '\n') {
+            int line_len = i - start + 1;
+            char line[BUF_SIZE];
+            if (line_len >= BUF_SIZE) line_len = BUF_SIZE - 1;
+            memcpy(line, c->recv_buf + start, line_len);
+            line[line_len] = '\0';
+            handle_command(idx, line);
+            start = i + 1;
+        }
+    }
+    if (start > 0) {
+        int remaining = c->recv_len - start;
+        memmove(c->recv_buf, c->recv_buf + start, remaining);
+        c->recv_len = remaining;
+    }
+}
+
+/* ===================== main server ===================== */
+
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <port>\n", argv[0]);
+        return 1;
+    }
+    int port = atoi(argv[1]);
+
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd < 0) { perror("socket"); return 1; }
+
+    int opt = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port        = htons(port);
+
+    if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("bind"); close(listen_fd); return 1;
+    }
+    if (listen(listen_fd, 16) < 0) {
+        perror("listen"); close(listen_fd); return 1;
+    }
+
+    printf("Server listening on port %d\n", port);
+
+    load_accounts();
+    init_clients();
+    init_rooms();
+
+    fd_set readfds;
+    int maxfd = listen_fd;
+
+    while (1) {
+        FD_ZERO(&readfds);
+        FD_SET(listen_fd, &readfds);
+        maxfd = listen_fd;
+        for (int i = 0; i < MAX_CLIENTS; ++i) {
+            if (clients[i].used) {
+                FD_SET(clients[i].fd, &readfds);
+                if (clients[i].fd > maxfd) maxfd = clients[i].fd;
+            }
+        }
+
+        int ret = select(maxfd + 1, &readfds, NULL, NULL, NULL);
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            perror("select");
+            break;
+        }
+
+        // K?t n?i m?i
+        if (FD_ISSET(listen_fd, &readfds)) {
+            struct sockaddr_in cliaddr;
+            socklen_t clilen = sizeof(cliaddr);
+            int cfd = accept(listen_fd, (struct sockaddr*)&cliaddr, &clilen);
+            if (cfd < 0) {
+                perror("accept");
+            } else {
+                int slot = find_empty_client_slot();
+                if (slot < 0) {
+                    const char *msg = "SERVER_FULL\n";
+                    send(cfd, msg, strlen(msg), 0);
+                    close(cfd);
+                } else {
+                    clients[slot].used      = 1;
+                    clients[slot].fd        = cfd;
+                    clients[slot].recv_len  = 0;
+                    clients[slot].logged_in = 0;
+                    clients[slot].room_id   = -1;
+                    clients[slot].username[0] = '\0';
+                    printf("New client at index %d (fd=%d)\n", slot, cfd);
+                    send_to_client(slot, "WELCOME TETRIS SERVER\n");
+                }
+            }
+        }
+
+        // D? li?u t? client
+        for (int i = 0; i < MAX_CLIENTS; ++i) {
+            if (!clients[i].used) continue;
+            int fd = clients[i].fd;
+            if (FD_ISSET(fd, &readfds)) {
+                char buf[1024];
+                ssize_t n = recv(fd, buf, sizeof(buf), 0);
+                if (n <= 0) {
+                    disconnect_client(i);
+                } else {
+                    if (clients[i].recv_len + n >= BUF_SIZE) {
+                        // tràn buffer -> reset cho an toàn
+                        clients[i].recv_len = 0;
+                    } else {
+                        memcpy(clients[i].recv_buf + clients[i].recv_len, buf, n);
+                        clients[i].recv_len += (int)n;
+                        process_client_buffer(i);
+                    }
+                }
+            }
+        }
+    }
+
+    close(listen_fd);
+    return 0;
+}
+
