@@ -1,5 +1,5 @@
-// server.c  -- Tetris online backend (không d? h?a)
-// Biên d?ch (Linux / WSL):  gcc server.c -o server
+// server.c  -- Tetris online backend (khong do hoa)
+// Bien dich (Linux / WSL):  gcc server.c -o server
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,15 +35,17 @@ typedef struct {
     int  recv_len;
     char username[USERNAME_LEN];
     int  logged_in;
-    int  room_id; // -1 n?u chua ? phòng nào
+    int  room_id; // -1 neu chua o phong nao
 } Client;
 
 typedef struct {
     int used;
     int id;               // roomId
-    int clients[4];       // index trong m?ng clients[]
+    int clients[4];       // index trong mang clients[]
     int num_players;
-    int playing;          // 0: ch?, 1: dang choi
+    int playing;          // 0: cho, 1: dang choi
+    int ready[4];         // trang thai ready cua moi nguoi choi
+    int scores[4];        // diem so cua moi nguoi choi
 } Room;
 
 static Client clients[MAX_CLIENTS];
@@ -60,11 +62,11 @@ static void trim_newline(char *s) {
     }
 }
 
-/* ---------- Tài kho?n ---------- */
+/* ---------- Tai khoan ---------- */
 
 static void load_accounts() {
     FILE *f = fopen(ACCOUNTS_FILE, "r");
-    if (!f) return; // chua có file
+    if (!f) return; // chua co file
 
     char u[USERNAME_LEN], p[PASSWORD_LEN];
     while (fscanf(f, "%31s %31s", u, p) == 2) {
@@ -85,7 +87,7 @@ static int find_account(const char *username) {
     return -1;
 }
 
-// tr? 0 = ok, -2 = dã t?n t?i, -1 = h?t ch?
+// tra 0 = ok, -2 = da ton tai, -1 = het cho
 static int add_account(const char *username, const char *password) {
     if (account_count >= MAX_ACCOUNTS) return -1;
     if (find_account(username) != -1)  return -2;
@@ -104,7 +106,7 @@ static int add_account(const char *username, const char *password) {
     return 0;
 }
 
-/* ---------- Kh?i t?o client / room ---------- */
+/* ---------- Khoi tao client / room ---------- */
 
 static void init_clients() {
     for (int i = 0; i < MAX_CLIENTS; ++i) {
@@ -123,16 +125,20 @@ static void init_rooms() {
         rooms[i].id          = 0;
         rooms[i].num_players = 0;
         rooms[i].playing     = 0;
-        for (int j = 0; j < 4; ++j) rooms[i].clients[j] = -1;
+        for (int j = 0; j < 4; ++j) {
+            rooms[i].clients[j] = -1;
+            rooms[i].ready[j] = 0;
+            rooms[i].scores[j] = 0;
+        }
     }
 }
 
-/* ---------- G?i / broadcast ---------- */
+/* ---------- Gui / broadcast ---------- */
 
 static void send_to_client(int idx, const char *msg) {
     if (!clients[idx].used) return;
     size_t len = strlen(msg);
-    send(clients[idx].fd, msg, len, 0);   // don gi?n, b? qua l?i
+    send(clients[idx].fd, msg, len, 0);   // don gian, bo qua loi
 }
 
 static void broadcast_room(int room_index, const char *msg) {
@@ -149,7 +155,7 @@ static int find_empty_client_slot() {
     return -1;
 }
 
-/* ---------- R?i phòng / disconnect ---------- */
+/* ---------- Roi phong / disconnect ---------- */
 
 static void remove_client_from_room(int client_index) {
     int rid = clients[client_index].room_id;
@@ -167,10 +173,16 @@ static void remove_client_from_room(int client_index) {
     Room *r = &rooms[rindex];
     for (int i = 0; i < r->num_players; ++i) {
         if (r->clients[i] == client_index) {
-            for (int j = i; j < r->num_players - 1; ++j)
+            // Xoa nguoi choi nay
+            for (int j = i; j < r->num_players - 1; ++j) {
                 r->clients[j] = r->clients[j+1];
+                r->ready[j] = r->ready[j+1];
+                r->scores[j] = r->scores[j+1];
+            }
             r->num_players--;
             r->clients[r->num_players] = -1;
+            r->ready[r->num_players] = 0;
+            r->scores[r->num_players] = 0;
             break;
         }
     }
@@ -197,7 +209,7 @@ static void disconnect_client(int idx) {
     clients[idx].username[0]= '\0';
 }
 
-/* ---------- Qu?n lý phòng ---------- */
+/* ---------- Quan ly phong ---------- */
 
 static int create_room_for_client(int client_idx) {
     int slot = -1;
@@ -211,7 +223,11 @@ static int create_room_for_client(int client_idx) {
     r->id          = next_room_id++;
     r->num_players = 1;
     r->playing     = 0;
-    for (int i = 0; i < 4; ++i) r->clients[i] = -1;
+    for (int i = 0; i < 4; ++i) {
+        r->clients[i] = -1;
+        r->ready[i] = 0;
+        r->scores[i] = 0;
+    }
     r->clients[0]  = client_idx;
 
     clients[client_idx].room_id = r->id;
@@ -231,11 +247,15 @@ static int join_room(int client_idx, int room_id) {
     Room *r = &rooms[rindex];
     if (r->num_players >= 4) return -2;
 
-    // tránh thêm trùng
+    // tranh them trung
     for (int i = 0; i < r->num_players; ++i)
         if (r->clients[i] == client_idx) return 0;
 
-    r->clients[r->num_players++] = client_idx;
+    int idx = r->num_players;
+    r->clients[idx] = client_idx;
+    r->ready[idx] = 0;
+    r->scores[idx] = 0;
+    r->num_players++;
     clients[client_idx].room_id = room_id;
     return 0;
 }
@@ -252,7 +272,7 @@ static void send_room_list(int client_idx) {
     send_to_client(client_idx, "ROOM_LIST_END\n");
 }
 
-/* ===================== X? lý l?nh t? client ===================== */
+/* ===================== Xu ly lenh tu client ===================== */
 
 static void handle_command(int cindex, char *line) {
     trim_newline(line);
@@ -323,6 +343,61 @@ static void handle_command(int cindex, char *line) {
         remove_client_from_room(cindex);
         send_to_client(cindex, "LEFT_ROOM\n");
 
+    } else if (strcmp(cmd, "READY") == 0) {
+        int rid = clients[cindex].room_id;
+        if (rid < 0) {
+            send_to_client(cindex, "ERROR Not_in_room\n");
+            return;
+        }
+        int rindex = find_room_by_id(rid);
+        if (rindex < 0) return;
+        
+        Room *r = &rooms[rindex];
+        // tim vi tri cua client trong phong
+        int pos = -1;
+        for (int i = 0; i < r->num_players; ++i) {
+            if (r->clients[i] == cindex) {
+                pos = i;
+                break;
+            }
+        }
+        if (pos < 0) return;
+        
+        r->ready[pos] = 1;
+        send_to_client(cindex, "READY_OK\n");
+        
+        // Broadcast trang thai ready den tat ca
+        char ready_status[BUF_SIZE];
+        int offset = 0;
+        offset += snprintf(ready_status + offset, BUF_SIZE - offset, "READY_STATUS");
+        for (int i = 0; i < r->num_players; ++i) {
+            int ci = r->clients[i];
+            const char *name = clients[ci].username[0] ? clients[ci].username : "guest";
+            offset += snprintf(ready_status + offset, BUF_SIZE - offset, " %s:%d",
+                             name, r->ready[i]);
+        }
+        offset += snprintf(ready_status + offset, BUF_SIZE - offset, "\n");
+        broadcast_room(rindex, ready_status);
+        
+        // kiem tra neu tat ca san sang
+        int all_ready = 1;
+        for (int i = 0; i < r->num_players; ++i) {
+            if (!r->ready[i]) {
+                all_ready = 0;
+                break;
+            }
+        }
+        
+        if (all_ready && r->num_players > 0) {
+            r->playing = 1;
+            // reset diem va ready
+            for (int i = 0; i < r->num_players; ++i) {
+                r->scores[i] = 0;
+                r->ready[i] = 0;  // reset ready de lan sau phai ready lai
+            }
+            broadcast_room(rindex, "START_GAME\n");
+        }
+
     } else if (strcmp(cmd, "GAME_SCORE") == 0) {
         int score = 0;
         if (sscanf(line, "GAME_SCORE %d", &score) != 1) {
@@ -336,18 +411,82 @@ static void handle_command(int cindex, char *line) {
         }
         int rindex = find_room_by_id(rid);
         if (rindex < 0) return;
-        char msg[128];
-        snprintf(msg, sizeof(msg), "SCORE_UPDATE %s %d\n",
-                 clients[cindex].username[0] ? clients[cindex].username : "guest",
-                 score);
+        
+        Room *r = &rooms[rindex];
+        // cap nhat diem cua nguoi choi nay
+        int pos = -1;
+        for (int i = 0; i < r->num_players; ++i) {
+            if (r->clients[i] == cindex) {
+                pos = i;
+                break;
+            }
+        }
+        if (pos >= 0) {
+            r->scores[pos] = score;
+        }
+        
+        // tao bang xep hang day du
+        // sao chep du lieu de sap xep
+        typedef struct {
+            char username[USERNAME_LEN];
+            int score;
+        } PlayerScore;
+        PlayerScore rankings[4];
+        for (int i = 0; i < r->num_players; ++i) {
+            int ci = r->clients[i];
+            strncpy(rankings[i].username, 
+                    clients[ci].username[0] ? clients[ci].username : "guest",
+                    USERNAME_LEN);
+            rankings[i].score = r->scores[i];
+        }
+        
+        // sap xep theo diem giam dan (bubble sort)
+        for (int i = 0; i < r->num_players - 1; ++i) {
+            for (int j = 0; j < r->num_players - i - 1; ++j) {
+                if (rankings[j].score < rankings[j+1].score) {
+                    PlayerScore tmp = rankings[j];
+                    rankings[j] = rankings[j+1];
+                    rankings[j+1] = tmp;
+                }
+            }
+        }
+        
+        // tao tin SCORE_UPDATE voi bang xep hang day du
+        char msg[BUF_SIZE];
+        int offset = 0;
+        offset += snprintf(msg + offset, BUF_SIZE - offset, "SCORE_UPDATE");
+        for (int i = 0; i < r->num_players; ++i) {
+            offset += snprintf(msg + offset, BUF_SIZE - offset, " %s:%d",
+                             rankings[i].username, rankings[i].score);
+        }
+        offset += snprintf(msg + offset, BUF_SIZE - offset, "\n");
+        
         broadcast_room(rindex, msg);
+
+    } else if (strcmp(cmd, "GAME_END") == 0) {
+        // Nguoi choi ket thuc game (quit)
+        int rid = clients[cindex].room_id;
+        if (rid < 0) return;
+        
+        int rindex = find_room_by_id(rid);
+        if (rindex < 0) return;
+        
+        Room *r = &rooms[rindex];
+        // tim vi tri va reset ready cua nguoi nay
+        for (int i = 0; i < r->num_players; ++i) {
+            if (r->clients[i] == cindex) {
+                r->ready[i] = 0;
+                break;
+            }
+        }
+        send_to_client(cindex, "GAME_END_OK\n");
 
     } else {
         send_to_client(cindex, "ERROR Unknown_command\n");
     }
 }
 
-/* Tách buffer theo dòng (x? lý truy?n dòng) */
+/* Tach buffer theo dong (xu ly truyen dong) */
 static void process_client_buffer(int idx) {
     Client *c = &clients[idx];
     int start = 0;
@@ -424,7 +563,7 @@ int main(int argc, char *argv[]) {
             break;
         }
 
-        // K?t n?i m?i
+        // Ket noi moi
         if (FD_ISSET(listen_fd, &readfds)) {
             struct sockaddr_in cliaddr;
             socklen_t clilen = sizeof(cliaddr);
@@ -450,7 +589,7 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        // D? li?u t? client
+        // Du lieu tu client
         for (int i = 0; i < MAX_CLIENTS; ++i) {
             if (!clients[i].used) continue;
             int fd = clients[i].fd;
@@ -461,7 +600,7 @@ int main(int argc, char *argv[]) {
                     disconnect_client(i);
                 } else {
                     if (clients[i].recv_len + n >= BUF_SIZE) {
-                        // tràn buffer -> reset cho an toàn
+                        // tran buffer -> reset cho an toan
                         clients[i].recv_len = 0;
                     } else {
                         memcpy(clients[i].recv_buf + clients[i].recv_len, buf, n);

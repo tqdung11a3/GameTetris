@@ -1,6 +1,6 @@
 // client.c  -- Tetris online client (terminal graphics)
-// Biên d?ch:  gcc client.c -o client
-// Ch?y:      ./client 127.0.0.1 5555
+// Bien dich:  gcc client.c -o client
+// Chay:      ./client 127.0.0.1 5555
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,7 +15,7 @@
 
 #define BUF_SIZE 4096
 
-/* ------------------------- ti?n ích chung ------------------------- */
+/* ------------------------- tien ich chung ------------------------- */
 
 static void trim_newline(char *s) {
     size_t len = strlen(s);
@@ -25,7 +25,7 @@ static void trim_newline(char *s) {
     }
 }
 
-/* K?t n?i TCP có buffer d? tách dòng (truy?n dòng) */
+/* Ket noi TCP co buffer de tach dong (truyen dong) */
 typedef struct {
     int  fd;
     char buf[BUF_SIZE];
@@ -37,7 +37,7 @@ static void conn_init(Conn *c, int fd) {
     c->len = 0;
 }
 
-/* Ð?c 1 dòng (blocking) – dùng cho lobby */
+/* Doc 1 dong (blocking) - dung cho lobby */
 static int conn_read_line(Conn *c, char *out, size_t out_size) {
     while (1) {
         for (int i = 0; i < c->len; ++i) {
@@ -58,16 +58,16 @@ static int conn_read_line(Conn *c, char *out, size_t out_size) {
             perror("recv");
             return -1;
         } else if (n == 0) {
-            return 0; // server dóng
+            return 0; // server dong
         } else {
             c->len += (int)n;
         }
     }
 }
 
-/* Ð?c 1 dòng (non-blocking) – dùng trong game loop */
+/* Doc 1 dong (non-blocking) - dung trong game loop */
 static int conn_read_line_nonblock(Conn *c, char *out, size_t out_size) {
-    // ki?m tra buffer hi?n có
+    // kiem tra buffer hien co
     for (int i = 0; i < c->len; ++i) {
         if (c->buf[i] == '\n') {
             int line_len = i + 1;
@@ -80,7 +80,7 @@ static int conn_read_line_nonblock(Conn *c, char *out, size_t out_size) {
             return 1;
         }
     }
-    // d?c thêm d? li?u (non-blocking)
+    // doc them du lieu (non-blocking)
     char tmp[1024];
     ssize_t n = recv(c->fd, tmp, sizeof(tmp), MSG_DONTWAIT);
     if (n <= 0) return 0;
@@ -103,7 +103,7 @@ static int conn_read_line_nonblock(Conn *c, char *out, size_t out_size) {
     return 0;
 }
 
-/* G?i 1 dòng, t? thêm '\n' n?u thi?u */
+/* Gui 1 dong, tu them '\n' neu thieu */
 static int conn_send_line(Conn *c, const char *line) {
     char buf[BUF_SIZE];
     size_t len = strlen(line);
@@ -128,7 +128,7 @@ typedef struct {
 
 static int board[BOARD_H][BOARD_W];
 
-/* 7 tetromino, m?i cái 4 rotation, m?i rotation là ma tr?n 4x4 */
+/* 7 tetromino, moi cai 4 rotation, moi rotation la ma tran 4x4 */
 static const int tetrominoes[7][4][4][4] = {
     {   // I
         {
@@ -364,7 +364,7 @@ static int board_clear_lines() {
     return lines;
 }
 
-/* v? b?ng + kh?i hi?n t?i + scoreboard */
+/* ve bang + khoi hien tai + scoreboard */
 static void draw_board(const Piece *p, int score, const char *scoreboard_text) {
     printf("\033[H\033[J"); // clear screen
     printf("TETRIS ONLINE - controls: a=left, d=right, s=down, w=rotate, q=quit\n");
@@ -391,12 +391,12 @@ static void draw_board(const Piece *p, int score, const char *scoreboard_text) {
         printf("|\n");
     }
     printf("--------------------------------\n");
-    printf("Room scoreboard (latest update):\n%s\n",
-           scoreboard_text ? scoreboard_text : "(none)");
+    printf("LEADERBOARD (Room):\n");
+    printf("%s\n", scoreboard_text ? scoreboard_text : "(waiting for scores...)");
     fflush(stdout);
 }
 
-/* d?c phím t? stdin (non-blocking) b?ng select */
+/* doc phim tu stdin (non-blocking) bang select */
 static int read_input_char(int timeout_ms) {
     fd_set rfds;
     FD_ZERO(&rfds);
@@ -412,7 +412,7 @@ static int read_input_char(int timeout_ms) {
     return -1;
 }
 
-/* vòng l?p choi Tetris – g?i GAME_SCORE, nh?n SCORE_UPDATE */
+/* vong lap choi Tetris - gui GAME_SCORE, nhan SCORE_UPDATE */
 static void tetris_game_loop(Conn *conn) {
     board_clear();
     srand((unsigned)time(NULL));
@@ -424,9 +424,9 @@ static void tetris_game_loop(Conn *conn) {
     cur.y     = 0;
 
     int score = 0;
-    char scoreboard_text[256] = "(no score yet)";
+    char scoreboard_text[512] = "Waiting for scores...";
 
-    /* chuy?n stdin sang ch? d? d?c t?ng ký t?, không echo */
+    /* chuyen stdin sang che do doc tung ky tu, khong echo */
     system("stty cbreak -echo");
 
     int game_over = 0;
@@ -438,17 +438,41 @@ static void tetris_game_loop(Conn *conn) {
         long now_ms = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
         if (last_drop == 0) last_drop = now_ms;
 
-        /* nh?n tin SCORE_UPDATE (n?u có) */
+        /* nhan tin SCORE_UPDATE (neu co) */
         char line[BUF_SIZE];
         while (conn_read_line_nonblock(conn, line, sizeof(line)) == 1) {
             trim_newline(line);
             if (strncmp(line, "SCORE_UPDATE", 12) == 0) {
-                snprintf(scoreboard_text, sizeof(scoreboard_text), "%s", line);
+                // phan tich bang xep hang: SCORE_UPDATE user1:score1 user2:score2 ...
+                char formatted[512] = "";
+                char *ptr = line + 12; // bo qua "SCORE_UPDATE"
+                int rank = 1;
+                while (*ptr != '\0') {
+                    while (*ptr == ' ') ptr++; // bo qua khoang trang
+                    if (*ptr == '\0') break;
+                    
+                    char username[64];
+                    int uscore = 0;
+                    if (sscanf(ptr, "%63[^:]:%d", username, &uscore) == 2) {
+                        char entry[128];
+                        snprintf(entry, sizeof(entry), "#%d: %s - %d points\n", 
+                                rank++, username, uscore);
+                        strncat(formatted, entry, sizeof(formatted) - strlen(formatted) - 1);
+                        
+                        // chuyen den user tiep theo
+                        while (*ptr != ' ' && *ptr != '\0') ptr++;
+                    } else {
+                        break;
+                    }
+                }
+                if (strlen(formatted) > 0) {
+                    snprintf(scoreboard_text, sizeof(scoreboard_text), "%s", formatted);
+                }
             }
         }
 
-        /* x? lý input ngu?i choi */
-        int ch = read_input_char(50); // ch? t?i da 50ms
+        /* xu ly input nguoi choi */
+        int ch = read_input_char(50); // cho toi da 50ms
         if (ch == 'q') {
             game_over = 1;
             break;
@@ -463,21 +487,21 @@ static void tetris_game_loop(Conn *conn) {
             if (piece_fits(&cur, cur.x, cur.y, nrot)) cur.rot = nrot;
         }
 
-        /* roi xu?ng theo th?i gian */
+        /* roi xuong theo thoi gian */
         clock_gettime(CLOCK_MONOTONIC, &ts);
         now_ms = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-        if (now_ms - last_drop >= 500) { // 500ms roi 1 ô
+        if (now_ms - last_drop >= 500) { // 500ms roi 1 o
             if (piece_fits(&cur, cur.x, cur.y+1, cur.rot)) {
                 cur.y++;
             } else {
-                // ch?m dáy: c? d?nh + clear line + spawn kh?i m?i
+                // cham day: co dinh + clear line + spawn khoi moi
                 piece_lock(&cur);
                 int lines = board_clear_lines();
                 if (lines > 0) {
                     score += lines * 100;
                     char cmd[64];
                     snprintf(cmd, sizeof(cmd), "GAME_SCORE %d", score);
-                    conn_send_line(conn, cmd); // g?i di?m lên server
+                    conn_send_line(conn, cmd); // gui diem len server
                 }
                 Piece next;
                 next.shape = rand() % 7;
@@ -485,7 +509,7 @@ static void tetris_game_loop(Conn *conn) {
                 next.x     = BOARD_W/2 - 2;
                 next.y     = 0;
                 if (!piece_fits(&next, next.x, next.y, next.rot)) {
-                    game_over = 1; // không còn ch?: thua
+                    game_over = 1; // khong con cho: thua
                 }
                 cur = next;
             }
@@ -496,19 +520,38 @@ static void tetris_game_loop(Conn *conn) {
     }
 
     system("stty sane");
+    
+    // Gui GAME_END den server de reset ready
+    conn_send_line(conn, "GAME_END");
+    char response[128];
+    // Doc response (non-blocking, khong cho lau)
+    conn_read_line_nonblock(conn, response, sizeof(response));
+    
+    // Clear stdin buffer de tranh doc nham ky tu
+    int ch;
+    while ((ch = getchar()) != EOF && ch != '\n');
+    
+    printf("\n===========================================\n");
     printf("Game over! Final score: %d\n", score);
+    printf("===========================================\n");
+    printf("Press ENTER to continue...");
+    getchar(); // cho nguoi choi nhan Enter
 }
 
 /* --------------------- menu lobby (console) --------------------- */
 
-static void print_menu() {
+static void print_menu(int in_room) {
     printf("\n==== TETRIS ONLINE CLIENT ====\n");
     printf("1. Register\n");
     printf("2. Login\n");
     printf("3. List rooms\n");
     printf("4. Create room\n");
     printf("5. Join room\n");
-    printf("6. Play Tetris in current room\n");
+    if (in_room) {
+        printf("6. Ready (start game when all ready)\n");
+    } else {
+        printf("6. (Must be in a room first)\n");
+    }
     printf("0. Exit\n");
     printf("Select: ");
     fflush(stdout);
@@ -551,9 +594,63 @@ int main(int argc, char *argv[]) {
     int running   = 1;
     int logged_in = 0;
     int in_room   = 0;
+    int waiting_for_game = 0;
 
     while (running) {
-        print_menu();
+        // Clear buffer cua connection truoc khi vao menu (tru khi dang cho game)
+        if (!waiting_for_game) {
+            char tmp_discard[BUF_SIZE];
+            while (conn_read_line_nonblock(&conn, tmp_discard, sizeof(tmp_discard)) == 1) {
+                // Bo qua cac tin nhan cu sau game
+            }
+        }
+        
+        // kiem tra neu server gui START_GAME khi dang cho
+        if (waiting_for_game) {
+            char tmp_line[BUF_SIZE];
+            int should_display = 1;
+            while (conn_read_line_nonblock(&conn, tmp_line, sizeof(tmp_line)) == 1) {
+                trim_newline(tmp_line);
+                if (strncmp(tmp_line, "START_GAME", 10) == 0) {
+                    printf("\n=== ALL PLAYERS READY! STARTING GAME... ===\n");
+                    sleep(1);
+                    waiting_for_game = 0;
+                    tetris_game_loop(&conn);
+                    // Sau khi game ket thuc, clear buffer lan nua
+                    while (conn_read_line_nonblock(&conn, tmp_line, sizeof(tmp_line)) == 1);
+                    break;
+                } else if (strncmp(tmp_line, "READY_STATUS", 12) == 0) {
+                    // Hien thi trang thai ready: READY_STATUS user1:1 user2:0 ...
+                    printf("\n--- Ready Status ---\n");
+                    char *ptr = tmp_line + 12;
+                    while (*ptr != '\0') {
+                        while (*ptr == ' ') ptr++;
+                        if (*ptr == '\0') break;
+                        
+                        char username[64];
+                        int is_ready = 0;
+                        if (sscanf(ptr, "%63[^:]:%d", username, &is_ready) == 2) {
+                            printf("  %s: %s\n", username, is_ready ? "[READY]" : "[NOT READY]");
+                            while (*ptr != ' ' && *ptr != '\0') ptr++;
+                        } else {
+                            break;
+                        }
+                    }
+                    printf("--------------------\n");
+                    should_display = 0;
+                }
+            }
+            if (waiting_for_game && should_display) {
+                printf("Waiting for other players to be ready...\n");
+                sleep(1);
+                continue;
+            } else if (waiting_for_game) {
+                sleep(1);
+                continue;
+            }
+        }
+        
+        print_menu(in_room);
         char choice[16];
         if (!fgets(choice, sizeof(choice), stdin)) break;
         int opt = atoi(choice);
@@ -619,12 +716,18 @@ int main(int argc, char *argv[]) {
             printf("Server: %s", line);
             if (strncmp(line, "JOIN_OK", 7) == 0) in_room = 1;
 
-        } else if (opt == 6) {          // PLAY TETRIS
+        } else if (opt == 6) {          // READY
             if (!in_room) {
                 printf("You must be in a room first (create or join).\n");
                 continue;
             }
-            tetris_game_loop(&conn);
+            conn_send_line(&conn, "READY");
+            if (conn_read_line(&conn, line, sizeof(line)) <= 0) { printf("Disconnected.\n"); break; }
+            printf("Server: %s", line);
+            if (strncmp(line, "READY_OK", 8) == 0) {
+                waiting_for_game = 1;
+                printf("You are ready! Waiting for other players...\n");
+            }
 
         } else {
             printf("Unknown option.\n");
