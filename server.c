@@ -46,6 +46,7 @@ typedef struct {
     int playing;          // 0: cho, 1: dang choi
     int ready[4];         // trang thai ready cua moi nguoi choi
     int scores[4];        // diem so cua moi nguoi choi
+    int game_started;     // 1 neu game da bat dau (tranh reset ready sai thoi diem)
 } Room;
 
 static Client clients[MAX_CLIENTS];
@@ -125,6 +126,7 @@ static void init_rooms() {
         rooms[i].id          = 0;
         rooms[i].num_players = 0;
         rooms[i].playing     = 0;
+        rooms[i].game_started = 0;
         for (int j = 0; j < 4; ++j) {
             rooms[i].clients[j] = -1;
             rooms[i].ready[j] = 0;
@@ -192,6 +194,7 @@ static void remove_client_from_room(int client_index) {
         r->used = 0;
         r->id   = 0;
         r->playing = 0;
+        r->game_started = 0;
     }
 }
 
@@ -223,6 +226,7 @@ static int create_room_for_client(int client_idx) {
     r->id          = next_room_id++;
     r->num_players = 1;
     r->playing     = 0;
+    r->game_started = 0;
     for (int i = 0; i < 4; ++i) {
         r->clients[i] = -1;
         r->ready[i] = 0;
@@ -353,6 +357,13 @@ static void handle_command(int cindex, char *line) {
         if (rindex < 0) return;
         
         Room *r = &rooms[rindex];
+        
+        // Khong cho ready neu game da bat dau
+        if (r->game_started) {
+            send_to_client(cindex, "ERROR Game_already_started\n");
+            return;
+        }
+        
         // tim vi tri cua client trong phong
         int pos = -1;
         for (int i = 0; i < r->num_players; ++i) {
@@ -388,14 +399,23 @@ static void handle_command(int cindex, char *line) {
             }
         }
         
-        if (all_ready && r->num_players > 0) {
+        if (all_ready && r->num_players > 0 && !r->game_started) {
             r->playing = 1;
-            // reset diem va ready
+            r->game_started = 1;
+            
+            // Gui countdown de dong bo
+            broadcast_room(rindex, "COUNTDOWN 3\n");
+            sleep(1);
+            broadcast_room(rindex, "COUNTDOWN 2\n");
+            sleep(1);
+            broadcast_room(rindex, "COUNTDOWN 1\n");
+            sleep(1);
+            broadcast_room(rindex, "START_GAME\n");
+            
+            // Reset diem (nhung GIU ready = 1 de tranh race condition)
             for (int i = 0; i < r->num_players; ++i) {
                 r->scores[i] = 0;
-                r->ready[i] = 0;  // reset ready de lan sau phai ready lai
             }
-            broadcast_room(rindex, "START_GAME\n");
         }
 
     } else if (strcmp(cmd, "GAME_SCORE") == 0) {
@@ -479,6 +499,21 @@ static void handle_command(int cindex, char *line) {
                 break;
             }
         }
+        
+        // Kiem tra neu tat ca deu ket thuc (ready = 0), reset game_started
+        int all_finished = 1;
+        for (int i = 0; i < r->num_players; ++i) {
+            if (r->ready[i]) {
+                all_finished = 0;
+                break;
+            }
+        }
+        
+        if (all_finished) {
+            r->playing = 0;
+            r->game_started = 0;
+        }
+        
         send_to_client(cindex, "GAME_END_OK\n");
 
     } else {

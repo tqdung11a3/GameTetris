@@ -538,6 +538,63 @@ static void tetris_game_loop(Conn *conn) {
     getchar(); // cho nguoi choi nhan Enter
 }
 
+/* Hien thi trang thai READY_STATUS */
+static void print_ready_status_line(const char *line) {
+    printf("\n--- Ready Status ---\n");
+    const char *ptr = line + 12; // bo qua "READY_STATUS"
+    while (*ptr != '\0') {
+        while (*ptr == ' ') ptr++;
+        if (*ptr == '\0') break;
+
+        char username[64];
+        int is_ready = 0;
+        if (sscanf(ptr, "%63[^:]:%d", username, &is_ready) == 2) {
+            printf("  %s: %s\n", username, is_ready ? "[READY]" : "[NOT READY]");
+            while (*ptr != ' ' && *ptr != '\0') ptr++;
+        } else {
+            break;
+        }
+    }
+    printf("--------------------\n");
+    fflush(stdout);
+}
+
+/* Cho den khi nhan START_GAME, xu ly COUNTDOWN/READY_STATUS */
+static void wait_for_game_start_blocking(Conn *conn) {
+    char line[BUF_SIZE];
+    while (1) {
+        int rr = conn_read_line(conn, line, sizeof(line));
+        if (rr <= 0) {
+            printf("Disconnected while waiting for game start.\n");
+            exit(1);
+        }
+        trim_newline(line);
+
+        if (strncmp(line, "COUNTDOWN", 9) == 0) {
+            int count = 0;
+            if (sscanf(line, "COUNTDOWN %d", &count) == 1) {
+                printf("\r*** GAME STARTING IN %d... ***", count);
+                fflush(stdout);
+            }
+        } else if (strncmp(line, "START_GAME", 10) == 0) {
+            printf("\n\n=== GO! GO! GO! ===\n");
+            fflush(stdout);
+            sleep(1);
+            tetris_game_loop(conn);
+            break;
+        } else if (strncmp(line, "READY_STATUS", 12) == 0) {
+            print_ready_status_line(line);
+        } else {
+            printf("\nServer: %s\n", line);
+            fflush(stdout);
+        }
+    }
+
+    // Clear buffer sau khi tro lai lobby
+    char discard[BUF_SIZE];
+    while (conn_read_line_nonblock(conn, discard, sizeof(discard)) == 1);
+}
+
 /* --------------------- menu lobby (console) --------------------- */
 
 static void print_menu(int in_room) {
@@ -594,62 +651,8 @@ int main(int argc, char *argv[]) {
     int running   = 1;
     int logged_in = 0;
     int in_room   = 0;
-    int waiting_for_game = 0;
 
     while (running) {
-        // Clear buffer cua connection truoc khi vao menu (tru khi dang cho game)
-        if (!waiting_for_game) {
-            char tmp_discard[BUF_SIZE];
-            while (conn_read_line_nonblock(&conn, tmp_discard, sizeof(tmp_discard)) == 1) {
-                // Bo qua cac tin nhan cu sau game
-            }
-        }
-        
-        // kiem tra neu server gui START_GAME khi dang cho
-        if (waiting_for_game) {
-            char tmp_line[BUF_SIZE];
-            int should_display = 1;
-            while (conn_read_line_nonblock(&conn, tmp_line, sizeof(tmp_line)) == 1) {
-                trim_newline(tmp_line);
-                if (strncmp(tmp_line, "START_GAME", 10) == 0) {
-                    printf("\n=== ALL PLAYERS READY! STARTING GAME... ===\n");
-                    sleep(1);
-                    waiting_for_game = 0;
-                    tetris_game_loop(&conn);
-                    // Sau khi game ket thuc, clear buffer lan nua
-                    while (conn_read_line_nonblock(&conn, tmp_line, sizeof(tmp_line)) == 1);
-                    break;
-                } else if (strncmp(tmp_line, "READY_STATUS", 12) == 0) {
-                    // Hien thi trang thai ready: READY_STATUS user1:1 user2:0 ...
-                    printf("\n--- Ready Status ---\n");
-                    char *ptr = tmp_line + 12;
-                    while (*ptr != '\0') {
-                        while (*ptr == ' ') ptr++;
-                        if (*ptr == '\0') break;
-                        
-                        char username[64];
-                        int is_ready = 0;
-                        if (sscanf(ptr, "%63[^:]:%d", username, &is_ready) == 2) {
-                            printf("  %s: %s\n", username, is_ready ? "[READY]" : "[NOT READY]");
-                            while (*ptr != ' ' && *ptr != '\0') ptr++;
-                        } else {
-                            break;
-                        }
-                    }
-                    printf("--------------------\n");
-                    should_display = 0;
-                }
-            }
-            if (waiting_for_game && should_display) {
-                printf("Waiting for other players to be ready...\n");
-                sleep(1);
-                continue;
-            } else if (waiting_for_game) {
-                sleep(1);
-                continue;
-            }
-        }
-        
         print_menu(in_room);
         char choice[16];
         if (!fgets(choice, sizeof(choice), stdin)) break;
@@ -722,11 +725,47 @@ int main(int argc, char *argv[]) {
                 continue;
             }
             conn_send_line(&conn, "READY");
-            if (conn_read_line(&conn, line, sizeof(line)) <= 0) { printf("Disconnected.\n"); break; }
-            printf("Server: %s", line);
-            if (strncmp(line, "READY_OK", 8) == 0) {
-                waiting_for_game = 1;
-                printf("You are ready! Waiting for other players...\n");
+            
+            int ready_ack_received = 0;
+            int game_started_inline = 0;
+            while (!ready_ack_received && !game_started_inline) {
+                int rr = conn_read_line(&conn, line, sizeof(line));
+                if (rr <= 0) {
+                    printf("Disconnected.\n");
+                    running = 0;
+                    break;
+                }
+                trim_newline(line);
+
+                if (strncmp(line, "READY_OK", 8) == 0) {
+                    ready_ack_received = 1;
+                    printf("You are ready! Waiting for other players...\n");
+                } else if (strncmp(line, "COUNTDOWN", 9) == 0) {
+                    int count = 0;
+                    if (sscanf(line, "COUNTDOWN %d", &count) == 1) {
+                        printf("\r*** GAME STARTING IN %d... ***", count);
+                        fflush(stdout);
+                    }
+                } else if (strncmp(line, "START_GAME", 10) == 0) {
+                    printf("\n\n=== GO! GO! GO! ===\n");
+                    fflush(stdout);
+                    sleep(1);
+                    game_started_inline = 1;
+                    tetris_game_loop(&conn);
+                    // Clear buffer
+                    char discard[BUF_SIZE];
+                    while (conn_read_line_nonblock(&conn, discard, sizeof(discard)) == 1);
+                } else if (strncmp(line, "READY_STATUS", 12) == 0) {
+                    print_ready_status_line(line);
+                } else {
+                    printf("Server: %s\n", line);
+                }
+            }
+
+            if (!running) break;
+            if (game_started_inline) continue;
+            if (ready_ack_received) {
+                wait_for_game_start_blocking(&conn);
             }
 
         } else {
