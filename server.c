@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <arpa/inet.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/select.h>
@@ -27,6 +28,8 @@ typedef struct {
 static Account accounts[MAX_ACCOUNTS];
 static int account_count = 0;
 static const char *ACCOUNTS_FILE = "accounts.txt";
+static const char *MATCH_HISTORY_FILE = "match_history.txt";
+static const char *PLAYER_RECORDS_FILE = "player_records.txt";
 
 typedef struct {
     int  used;
@@ -47,6 +50,10 @@ typedef struct {
     int ready[4];         // trang thai ready cua moi nguoi choi
     int scores[4];        // diem so cua moi nguoi choi
     int game_started;     // 1 neu game da bat dau (tranh reset ready sai thoi diem)
+    int game_mode;        // 0: survival, 1: 60s, 2: 180s, 3: 300s
+    int time_limit;       // thoi gian gioi han (giay), 0 = khong gioi han
+    int mode_selected;    // 1 neu mode da duoc chon, 0 neu chua
+    int mode_chooser;     // client index cua nguoi duoc phep chon mode, -1 neu chua co
 } Room;
 
 static Client clients[MAX_CLIENTS];
@@ -107,6 +114,116 @@ static int add_account(const char *username, const char *password) {
     return 0;
 }
 
+/* ---------- Ki luc nguoi choi ---------- */
+
+// Lay diem cao nhat cua nguoi choi tu file
+static int get_player_record(const char *username) {
+    FILE *f = fopen(PLAYER_RECORDS_FILE, "r");
+    if (!f) return 0;
+    
+    char u[USERNAME_LEN];
+    int score;
+    while (fscanf(f, "%31s %d", u, &score) == 2) {
+        if (strcmp(u, username) == 0) {
+            fclose(f);
+            return score;
+        }
+    }
+    fclose(f);
+    return 0;
+}
+
+// Cap nhat ki luc nguoi choi (neu score moi cao hon)
+static void update_player_record(const char *username, int new_score) {
+    int old_record = get_player_record(username);
+    if (new_score <= old_record && old_record > 0) return; // khong can cap nhat
+    
+    // Doc tat ca records
+    typedef struct {
+        char username[USERNAME_LEN];
+        int score;
+    } Record;
+    Record records[MAX_ACCOUNTS];
+    int count = 0;
+    
+    FILE *f = fopen(PLAYER_RECORDS_FILE, "r");
+    if (f) {
+        while (count < MAX_ACCOUNTS && fscanf(f, "%31s %d", records[count].username, &records[count].score) == 2) {
+            count++;
+        }
+        fclose(f);
+    }
+    
+    // Cap nhat hoac them moi
+    int found = 0;
+    for (int i = 0; i < count; ++i) {
+        if (strcmp(records[i].username, username) == 0) {
+            records[i].score = new_score;
+            found = 1;
+            break;
+        }
+    }
+    if (!found && count < MAX_ACCOUNTS) {
+        strncpy(records[count].username, username, USERNAME_LEN);
+        records[count].username[USERNAME_LEN-1] = '\0';
+        records[count].score = new_score;
+        count++;
+    }
+    
+    // Ghi lai file
+    f = fopen(PLAYER_RECORDS_FILE, "w");
+    if (f) {
+        for (int i = 0; i < count; ++i) {
+            fprintf(f, "%s %d\n", records[i].username, records[i].score);
+        }
+        fclose(f);
+    }
+}
+
+/* ---------- Lich su dau ---------- */
+
+static void save_match_history(int room_id, const char *player_names[], int player_scores[], int num_players) {
+    FILE *f = fopen(MATCH_HISTORY_FILE, "a");
+    if (!f) return;
+    
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    char timestamp[64];
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", t);
+    
+    fprintf(f, "=== Match Room %d - %s ===\n", room_id, timestamp);
+    
+    // Sap xep theo diem giam dan
+    typedef struct {
+        char name[USERNAME_LEN];
+        int score;
+    } PlayerData;
+    PlayerData sorted[4];
+    for (int i = 0; i < num_players; ++i) {
+        strncpy(sorted[i].name, player_names[i], USERNAME_LEN);
+        sorted[i].score = player_scores[i];
+    }
+    
+    // Bubble sort
+    for (int i = 0; i < num_players - 1; ++i) {
+        for (int j = 0; j < num_players - i - 1; ++j) {
+            if (sorted[j].score < sorted[j+1].score) {
+                PlayerData tmp = sorted[j];
+                sorted[j] = sorted[j+1];
+                sorted[j+1] = tmp;
+            }
+        }
+    }
+    
+    for (int i = 0; i < num_players; ++i) {
+        fprintf(f, "#%d: %s - %d points", i+1, sorted[i].name, sorted[i].score);
+        if (i == 0) fprintf(f, " [WINNER]");
+        fprintf(f, "\n");
+    }
+    fprintf(f, "\n");
+    fclose(f);
+}
+
 /* ---------- Khoi tao client / room ---------- */
 
 static void init_clients() {
@@ -127,6 +244,10 @@ static void init_rooms() {
         rooms[i].num_players = 0;
         rooms[i].playing     = 0;
         rooms[i].game_started = 0;
+        rooms[i].game_mode   = 0;
+        rooms[i].time_limit  = 0;
+        rooms[i].mode_selected = 0;
+        rooms[i].mode_chooser = -1;
         for (int j = 0; j < 4; ++j) {
             rooms[i].clients[j] = -1;
             rooms[i].ready[j] = 0;
@@ -173,8 +294,26 @@ static void remove_client_from_room(int client_index) {
     }
 
     Room *r = &rooms[rindex];
+    const char *dc_username = clients[client_index].username[0] ? clients[client_index].username : "guest";
+    int dc_score = 0;
+    
     for (int i = 0; i < r->num_players; ++i) {
         if (r->clients[i] == client_index) {
+            dc_score = r->scores[i];
+            
+            // Neu dang choi game, broadcast thong bao disconnect
+            if (r->game_started) {
+                char notify_msg[256];
+                snprintf(notify_msg, sizeof(notify_msg), "PLAYER_DISCONNECTED %s %d\n", 
+                         dc_username, dc_score);
+                broadcast_room(rindex, notify_msg);
+                
+                // Cap nhat ki luc neu da dang nhap
+                if (clients[client_index].logged_in) {
+                    update_player_record(dc_username, dc_score);
+                }
+            }
+            
             // Xoa nguoi choi nay
             for (int j = i; j < r->num_players - 1; ++j) {
                 r->clients[j] = r->clients[j+1];
@@ -195,6 +334,10 @@ static void remove_client_from_room(int client_index) {
         r->id   = 0;
         r->playing = 0;
         r->game_started = 0;
+        r->game_mode = 0;
+        r->time_limit = 0;
+        r->mode_selected = 0;
+        r->mode_chooser = -1;
     }
 }
 
@@ -374,8 +517,29 @@ static void handle_command(int cindex, char *line) {
         }
         if (pos < 0) return;
         
+        // Kiem tra xem da co nguoi ready chua (truoc khi set ready)
+        int ready_count_before = 0;
+        for (int i = 0; i < r->num_players; ++i) {
+            if (r->ready[i]) ready_count_before++;
+        }
+        
+        // Set ready
         r->ready[pos] = 1;
-        send_to_client(cindex, "READY_OK\n");
+        
+        // Kiem tra xem day co phai nguoi ready dau tien khong
+        if (ready_count_before == 0 && r->num_players > 1) {
+            // Nguoi ready dau tien chon game mode
+            r->mode_chooser = cindex;  // Luu nguoi duoc phep chon mode
+            send_to_client(cindex, "CHOOSE_MODE\n");
+        } else {
+            // Neu chi co 1 nguoi, tu dong set survival mode
+            if (r->num_players == 1 && !r->mode_selected) {
+                r->game_mode = 0;
+                r->time_limit = 0;
+                r->mode_selected = 1;
+            }
+            send_to_client(cindex, "READY_OK\n");
+        }
         
         // Broadcast trang thai ready den tat ca
         char ready_status[BUF_SIZE];
@@ -399,7 +563,15 @@ static void handle_command(int cindex, char *line) {
             }
         }
         
-        if (all_ready && r->num_players > 0 && !r->game_started) {
+        // Dieu kien bat dau game:
+        // - Tat ca ready
+        // - VA mode da duoc chon (neu co >1 nguoi)
+        int can_start = all_ready && r->num_players > 0 && !r->game_started;
+        if (r->num_players > 1) {
+            can_start = can_start && r->mode_selected;
+        }
+        
+        if (can_start) {
             r->playing = 1;
             r->game_started = 1;
             
@@ -410,12 +582,27 @@ static void handle_command(int cindex, char *line) {
             sleep(1);
             broadcast_room(rindex, "COUNTDOWN 1\n");
             sleep(1);
-            broadcast_room(rindex, "START_GAME\n");
+            // Gui START_GAME voi mode va time limit
+            char start_msg[256];
+            snprintf(start_msg, sizeof(start_msg), "START_GAME %d %d\n", r->game_mode, r->time_limit);
+            broadcast_room(rindex, start_msg);
             
             // Reset diem (nhung GIU ready = 1 de tranh race condition)
             for (int i = 0; i < r->num_players; ++i) {
                 r->scores[i] = 0;
             }
+            
+            // Gui SCORE_UPDATE ban dau voi tat ca nguoi choi diem 0
+            char initial_score_msg[BUF_SIZE];
+            int offset = 0;
+            offset += snprintf(initial_score_msg + offset, BUF_SIZE - offset, "SCORE_UPDATE");
+            for (int i = 0; i < r->num_players; ++i) {
+                int ci = r->clients[i];
+                const char *username = clients[ci].username[0] ? clients[ci].username : "guest";
+                offset += snprintf(initial_score_msg + offset, BUF_SIZE - offset, " %s:0", username);
+            }
+            offset += snprintf(initial_score_msg + offset, BUF_SIZE - offset, "\n");
+            broadcast_room(rindex, initial_score_msg);
         }
 
     } else if (strcmp(cmd, "GAME_SCORE") == 0) {
@@ -483,6 +670,98 @@ static void handle_command(int cindex, char *line) {
         
         broadcast_room(rindex, msg);
 
+    } else if (strcmp(cmd, "SET_MODE") == 0) {
+        int mode = 0;
+        if (sscanf(line, "SET_MODE %d", &mode) != 1) {
+            send_to_client(cindex, "ERROR Invalid_mode\n");
+            return;
+        }
+        
+        int rid = clients[cindex].room_id;
+        if (rid < 0) {
+            send_to_client(cindex, "ERROR Not_in_room\n");
+            return;
+        }
+        int rindex = find_room_by_id(rid);
+        if (rindex < 0) return;
+        
+        Room *r = &rooms[rindex];
+        
+        // Chi nguoi duoc chon (mode_chooser) moi duoc set mode
+        if (r->mode_chooser != cindex) {
+            send_to_client(cindex, "ERROR Not_authorized\n");
+            return;
+        }
+        
+        // Set mode va time limit
+        r->game_mode = mode;
+        switch(mode) {
+            case 0: r->time_limit = 0; break;      // Survival
+            case 1: r->time_limit = 60; break;     // 60s
+            case 2: r->time_limit = 180; break;    // 180s
+            case 3: r->time_limit = 300; break;    // 300s
+            default: r->time_limit = 0; break;
+        }
+        
+        r->mode_selected = 1;  // Danh dau mode da duoc chon
+        
+        send_to_client(cindex, "READY_OK\n");
+        
+        // Broadcast mode den tat ca
+        char mode_msg[256];
+        const char *mode_name = "";
+        switch(mode) {
+            case 0: mode_name = "SURVIVAL"; break;
+            case 1: mode_name = "TIME_ATTACK_60s"; break;
+            case 2: mode_name = "TIME_ATTACK_180s"; break;
+            case 3: mode_name = "TIME_ATTACK_300s"; break;
+        }
+        snprintf(mode_msg, sizeof(mode_msg), "GAME_MODE %s %d\n", mode_name, r->time_limit);
+        broadcast_room(rindex, mode_msg);
+        
+        // Kiem tra xem tat ca da ready chua -> bat dau game
+        int all_ready = 1;
+        for (int i = 0; i < r->num_players; ++i) {
+            if (!r->ready[i]) {
+                all_ready = 0;
+                break;
+            }
+        }
+        
+        if (all_ready && !r->game_started) {
+            r->playing = 1;
+            r->game_started = 1;
+            
+            // Gui countdown de dong bo
+            broadcast_room(rindex, "COUNTDOWN 3\n");
+            sleep(1);
+            broadcast_room(rindex, "COUNTDOWN 2\n");
+            sleep(1);
+            broadcast_room(rindex, "COUNTDOWN 1\n");
+            sleep(1);
+            // Gui START_GAME voi mode va time limit
+            char start_msg[256];
+            snprintf(start_msg, sizeof(start_msg), "START_GAME %d %d\n", r->game_mode, r->time_limit);
+            broadcast_room(rindex, start_msg);
+            
+            // Reset diem (nhung GIU ready = 1 de tranh race condition)
+            for (int i = 0; i < r->num_players; ++i) {
+                r->scores[i] = 0;
+            }
+            
+            // Gui SCORE_UPDATE ban dau voi tat ca nguoi choi diem 0
+            char initial_score_msg[BUF_SIZE];
+            int offset = 0;
+            offset += snprintf(initial_score_msg + offset, BUF_SIZE - offset, "SCORE_UPDATE");
+            for (int i = 0; i < r->num_players; ++i) {
+                int ci = r->clients[i];
+                const char *username = clients[ci].username[0] ? clients[ci].username : "guest";
+                offset += snprintf(initial_score_msg + offset, BUF_SIZE - offset, " %s:0", username);
+            }
+            offset += snprintf(initial_score_msg + offset, BUF_SIZE - offset, "\n");
+            broadcast_room(rindex, initial_score_msg);
+        }
+
     } else if (strcmp(cmd, "GAME_END") == 0) {
         // Nguoi choi ket thuc game (quit)
         int rid = clients[cindex].room_id;
@@ -492,13 +771,30 @@ static void handle_command(int cindex, char *line) {
         if (rindex < 0) return;
         
         Room *r = &rooms[rindex];
+        
+        // Lay thong tin nguoi choi nay
+        const char *finished_username = clients[cindex].username[0] ? clients[cindex].username : "guest";
+        int finished_score = 0;
+        
         // tim vi tri va reset ready cua nguoi nay
         for (int i = 0; i < r->num_players; ++i) {
             if (r->clients[i] == cindex) {
+                finished_score = r->scores[i];
                 r->ready[i] = 0;
+                
+                // Cap nhat ki luc nguoi choi (neu da dang nhap)
+                if (clients[cindex].logged_in) {
+                    update_player_record(finished_username, finished_score);
+                }
                 break;
             }
         }
+        
+        // Broadcast cho cac client khac biet nguoi nay da ket thuc
+        char notify_msg[256];
+        snprintf(notify_msg, sizeof(notify_msg), "PLAYER_FINISHED %s %d\n", 
+                 finished_username, finished_score);
+        broadcast_room(rindex, notify_msg);
         
         // Kiem tra neu tat ca deu ket thuc (ready = 0), reset game_started
         int all_finished = 1;
@@ -509,9 +805,59 @@ static void handle_command(int cindex, char *line) {
             }
         }
         
-        if (all_finished) {
+        if (all_finished && r->game_started) {
+            // Tao bang ket qua cuoi cung
+            typedef struct {
+                char username[USERNAME_LEN];
+                int score;
+            } PlayerScore;
+            PlayerScore rankings[4];
+            for (int i = 0; i < r->num_players; ++i) {
+                int ci = r->clients[i];
+                strncpy(rankings[i].username, 
+                        clients[ci].username[0] ? clients[ci].username : "guest",
+                        USERNAME_LEN);
+                rankings[i].score = r->scores[i];
+            }
+            
+            // Sap xep theo diem giam dan
+            for (int i = 0; i < r->num_players - 1; ++i) {
+                for (int j = 0; j < r->num_players - i - 1; ++j) {
+                    if (rankings[j].score < rankings[j+1].score) {
+                        PlayerScore tmp = rankings[j];
+                        rankings[j] = rankings[j+1];
+                        rankings[j+1] = tmp;
+                    }
+                }
+            }
+            
+            // Gui ket qua cuoi cung den tat ca
+            char final_msg[BUF_SIZE];
+            int offset = 0;
+            offset += snprintf(final_msg + offset, BUF_SIZE - offset, "FINAL_RESULTS");
+            for (int i = 0; i < r->num_players; ++i) {
+                offset += snprintf(final_msg + offset, BUF_SIZE - offset, " %s:%d",
+                                 rankings[i].username, rankings[i].score);
+            }
+            offset += snprintf(final_msg + offset, BUF_SIZE - offset, "\n");
+            broadcast_room(rindex, final_msg);
+            
+            // Luu lich su dau
+            const char *player_names[4];
+            int player_scores[4];
+            for (int i = 0; i < r->num_players; ++i) {
+                int ci = r->clients[i];
+                player_names[i] = clients[ci].username[0] ? clients[ci].username : "guest";
+                player_scores[i] = r->scores[i];
+            }
+            save_match_history(r->id, player_names, player_scores, r->num_players);
+            
             r->playing = 0;
             r->game_started = 0;
+            r->game_mode = 0;
+            r->time_limit = 0;
+            r->mode_selected = 0;
+            r->mode_chooser = -1;
         }
         
         send_to_client(cindex, "GAME_END_OK\n");

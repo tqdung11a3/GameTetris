@@ -365,10 +365,14 @@ static int board_clear_lines() {
 }
 
 /* ve bang + khoi hien tai + scoreboard */
-static void draw_board(const Piece *p, int score, const char *scoreboard_text) {
+static void draw_board(const Piece *p, int score, const char *scoreboard_text, int time_left, int time_limit) {
     printf("\033[H\033[J"); // clear screen
     printf("TETRIS ONLINE - controls: a=left, d=right, s=down, w=rotate, q=quit\n");
-    printf("Your score: %d\n", score);
+    printf("Your score: %d", score);
+    if (time_limit > 0) {
+        printf(" | Time left: %d/%d sec", time_left, time_limit);
+    }
+    printf("\n");
     printf("--------------------------------\n");
 
     for (int y = 0; y < BOARD_H; ++y) {
@@ -413,7 +417,7 @@ static int read_input_char(int timeout_ms) {
 }
 
 /* vong lap choi Tetris - gui GAME_SCORE, nhan SCORE_UPDATE */
-static void tetris_game_loop(Conn *conn) {
+static void tetris_game_loop(Conn *conn, int time_limit) {
     board_clear();
     srand((unsigned)time(NULL));
 
@@ -424,21 +428,34 @@ static void tetris_game_loop(Conn *conn) {
     cur.y     = 0;
 
     int score = 0;
-    char scoreboard_text[512] = "Waiting for scores...";
+    char scoreboard_text[512] = "";
 
     /* chuyen stdin sang che do doc tung ky tu, khong echo */
     system("stty cbreak -echo");
 
     int game_over = 0;
     long last_drop = 0;
+    long start_time = 0;
     struct timespec ts;
 
     while (!game_over) {
         clock_gettime(CLOCK_MONOTONIC, &ts);
         long now_ms = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-        if (last_drop == 0) last_drop = now_ms;
+        if (last_drop == 0) {
+            last_drop = now_ms;
+            start_time = now_ms;
+        }
+        
+        // Kiem tra het thoi gian (neu co time limit)
+        if (time_limit > 0) {
+            long elapsed_sec = (now_ms - start_time) / 1000;
+            if (elapsed_sec >= time_limit) {
+                game_over = 1;
+                break;
+            }
+        }
 
-        /* nhan tin SCORE_UPDATE (neu co) */
+        /* nhan tin SCORE_UPDATE, PLAYER_FINISHED, PLAYER_DISCONNECTED (neu co) */
         char line[BUF_SIZE];
         while (conn_read_line_nonblock(conn, line, sizeof(line)) == 1) {
             trim_newline(line);
@@ -467,6 +484,26 @@ static void tetris_game_loop(Conn *conn) {
                 }
                 if (strlen(formatted) > 0) {
                     snprintf(scoreboard_text, sizeof(scoreboard_text), "%s", formatted);
+                }
+            } else if (strncmp(line, "PLAYER_FINISHED", 15) == 0) {
+                // Thong bao co nguoi ket thuc game
+                char username[64];
+                int final_score = 0;
+                if (sscanf(line, "PLAYER_FINISHED %63s %d", username, &final_score) == 2) {
+                    // Them thong bao vao scoreboard_text
+                    char notify[128];
+                    snprintf(notify, sizeof(notify), "\n>>> %s GAME OVER <<<", username);
+                    strncat(scoreboard_text, notify, sizeof(scoreboard_text) - strlen(scoreboard_text) - 1);
+                }
+            } else if (strncmp(line, "PLAYER_DISCONNECTED", 19) == 0) {
+                // Thong bao co nguoi disconnect
+                char username[64];
+                int final_score = 0;
+                if (sscanf(line, "PLAYER_DISCONNECTED %63s %d", username, &final_score) == 2) {
+                    // Them thong bao vao scoreboard_text
+                    char notify[128];
+                    snprintf(notify, sizeof(notify), "\n>>> %s OUT GAME <<<", username);
+                    strncat(scoreboard_text, notify, sizeof(scoreboard_text) - strlen(scoreboard_text) - 1);
                 }
             }
         }
@@ -498,7 +535,37 @@ static void tetris_game_loop(Conn *conn) {
                 piece_lock(&cur);
                 int lines = board_clear_lines();
                 if (lines > 0) {
-                    score += lines * 100;
+                    // He thong diem Tetris goc: an nhieu hang cung luc = nhieu diem hon
+                    int points = 0;
+                    const char *line_name = "";
+                    switch(lines) {
+                        case 1: 
+                            points = 100;
+                            line_name = "SINGLE!";
+                            break;
+                        case 2: 
+                            points = 300;
+                            line_name = "DOUBLE!!";
+                            break;
+                        case 3: 
+                            points = 500;
+                            line_name = "TRIPLE!!!";
+                            break;
+                        case 4: 
+                            points = 800;
+                            line_name = "TETRIS!!!!";
+                            break;
+                        default: 
+                            points = lines * 100;
+                            line_name = "AMAZING!";
+                            break;
+                    }
+                    score += points;
+                    
+                    // Hien thi thong bao tam thoi
+                    printf("\n\033[1;33m>>> %s +%d points! <<<\033[0m\n", line_name, points);
+                    fflush(stdout);
+                    
                     char cmd[64];
                     snprintf(cmd, sizeof(cmd), "GAME_SCORE %d", score);
                     conn_send_line(conn, cmd); // gui diem len server
@@ -516,26 +583,95 @@ static void tetris_game_loop(Conn *conn) {
             last_drop = now_ms;
         }
 
-        draw_board(&cur, score, scoreboard_text);
+        // Tinh thoi gian con lai
+        int time_left = 0;
+        if (time_limit > 0) {
+            long elapsed_sec = (now_ms - start_time) / 1000;
+            time_left = time_limit - elapsed_sec;
+            if (time_left < 0) time_left = 0;
+        }
+        
+        draw_board(&cur, score, scoreboard_text, time_left, time_limit);
     }
 
     system("stty sane");
     
+    // Gui diem cuoi cung truoc khi ket thuc (ke ca 0 diem)
+    char final_score_cmd[64];
+    snprintf(final_score_cmd, sizeof(final_score_cmd), "GAME_SCORE %d", score);
+    conn_send_line(conn, final_score_cmd);
+    
     // Gui GAME_END den server de reset ready
     conn_send_line(conn, "GAME_END");
-    char response[128];
-    // Doc response (non-blocking, khong cho lau)
-    conn_read_line_nonblock(conn, response, sizeof(response));
     
-    // Clear stdin buffer de tranh doc nham ky tu
+    // Doi nhan ket qua cuoi cung tu server
+    printf("\n\033[1;32m===========================================\033[0m\n");
+    printf("\033[1;33m           MATCH RESULTS\033[0m\n");
+    printf("\033[1;32m===========================================\033[0m\n");
+    printf("Your final score: \033[1;36m%d\033[0m\n\n", score);
+    
+    // Doi FINAL_RESULTS hoac GAME_END_OK
+    int got_results = 0;
+    for (int attempts = 0; attempts < 50; attempts++) {  // Doi toi da 5s
+        char response[BUF_SIZE];
+        if (conn_read_line_nonblock(conn, response, sizeof(response)) == 1) {
+            trim_newline(response);
+            if (strncmp(response, "FINAL_RESULTS", 13) == 0) {
+                // Hien thi ket qua cuoi cung
+                printf("\033[1;33mFinal Ranking:\033[0m\n");
+                printf("-------------------------------------------\n");
+                
+                char *ptr = response + 13; // Bo qua "FINAL_RESULTS"
+                int rank = 1;
+                while (*ptr != '\0') {
+                    while (*ptr == ' ') ptr++;
+                    if (*ptr == '\0') break;
+                    
+                    char username[64];
+                    int uscore = 0;
+                    if (sscanf(ptr, "%63[^:]:%d", username, &uscore) == 2) {
+                        if (rank == 1) {
+                            printf("\033[1;33m  🏆 #%d: %-15s %d points [WINNER]\033[0m\n", 
+                                   rank, username, uscore);
+                        } else if (rank == 2) {
+                            printf("\033[1;37m  🥈 #%d: %-15s %d points\033[0m\n", 
+                                   rank, username, uscore);
+                        } else if (rank == 3) {
+                            printf("\033[1;31m  🥉 #%d: %-15s %d points\033[0m\n", 
+                                   rank, username, uscore);
+                        } else {
+                            printf("     #%d: %-15s %d points\n", 
+                                   rank, username, uscore);
+                        }
+                        rank++;
+                        
+                        // Chuyen den user tiep theo
+                        while (*ptr != ' ' && *ptr != '\0') ptr++;
+                    } else {
+                        break;
+                    }
+                }
+                got_results = 1;
+                break;
+            } else if (strncmp(response, "GAME_END_OK", 11) == 0) {
+                break;
+            }
+        }
+        usleep(100000);  // Doi 100ms
+    }
+    
+    if (!got_results) {
+        printf("Waiting for other players to finish...\n");
+    }
+    
+    printf("\033[1;32m===========================================\033[0m\n");
+    
+    // Clear stdin buffer
     int ch;
     while ((ch = getchar()) != EOF && ch != '\n');
     
-    printf("\n===========================================\n");
-    printf("Game over! Final score: %d\n", score);
-    printf("===========================================\n");
     printf("Press ENTER to continue...");
-    getchar(); // cho nguoi choi nhan Enter
+    getchar();
 }
 
 /* Hien thi trang thai READY_STATUS */
@@ -570,17 +706,34 @@ static void wait_for_game_start_blocking(Conn *conn) {
         }
         trim_newline(line);
 
-        if (strncmp(line, "COUNTDOWN", 9) == 0) {
+        if (strncmp(line, "GAME_MODE", 9) == 0) {
+            // Nhan thong bao mode da duoc chon
+            char mode_name[64];
+            int time_limit = 0;
+            if (sscanf(line, "GAME_MODE %63s %d", mode_name, &time_limit) >= 1) {
+                printf("\n>>> Game Mode: %s", mode_name);
+                if (time_limit > 0) {
+                    printf(" (%d seconds)", time_limit);
+                }
+                printf(" <<<\n");
+            }
+        } else if (strncmp(line, "COUNTDOWN", 9) == 0) {
             int count = 0;
             if (sscanf(line, "COUNTDOWN %d", &count) == 1) {
                 printf("\r*** GAME STARTING IN %d... ***", count);
                 fflush(stdout);
             }
         } else if (strncmp(line, "START_GAME", 10) == 0) {
+            int mode = 0, time_limit = 0;
+            sscanf(line, "START_GAME %d %d", &mode, &time_limit);
+            
             printf("\n\n=== GO! GO! GO! ===\n");
+            if (time_limit > 0) {
+                printf("=== TIME LIMIT: %d seconds ===\n", time_limit);
+            }
             fflush(stdout);
             sleep(1);
-            tetris_game_loop(conn);
+            tetris_game_loop(conn, time_limit);
             break;
         } else if (strncmp(line, "READY_STATUS", 12) == 0) {
             print_ready_status_line(line);
@@ -609,6 +762,8 @@ static void print_menu(int in_room) {
     } else {
         printf("6. (Must be in a room first)\n");
     }
+    printf("7. View Match History\n");
+    printf("8. View Player Records\n");
     printf("0. Exit\n");
     printf("Select: ");
     fflush(stdout);
@@ -737,9 +892,42 @@ int main(int argc, char *argv[]) {
                 }
                 trim_newline(line);
 
-                if (strncmp(line, "READY_OK", 8) == 0) {
+                if (strncmp(line, "CHOOSE_MODE", 11) == 0) {
+                    // Nguoi ready dau tien chon mode
+                    printf("\n=== SELECT GAME MODE ===\n");
+                    printf("0. SURVIVAL (Play until game over)\n");
+                    printf("1. TIME ATTACK - 60 seconds\n");
+                    printf("2. TIME ATTACK - 180 seconds (3 min)\n");
+                    printf("3. TIME ATTACK - 300 seconds (5 min)\n");
+                    printf("Select mode: ");
+                    fflush(stdout);
+                    
+                    int mode = 0;
+                    if (scanf("%d", &mode) == 1 && mode >= 0 && mode <= 3) {
+                        char mode_cmd[64];
+                        snprintf(mode_cmd, sizeof(mode_cmd), "SET_MODE %d", mode);
+                        conn_send_line(&conn, mode_cmd);
+                    } else {
+                        printf("Invalid mode, using SURVIVAL mode\n");
+                        conn_send_line(&conn, "SET_MODE 0");
+                    }
+                    // Clear input buffer
+                    int ch;
+                    while ((ch = getchar()) != '\n' && ch != EOF);
+                } else if (strncmp(line, "READY_OK", 8) == 0) {
                     ready_ack_received = 1;
                     printf("You are ready! Waiting for other players...\n");
+                } else if (strncmp(line, "GAME_MODE", 9) == 0) {
+                    // Nhan thong bao mode da duoc chon
+                    char mode_name[64];
+                    int time_limit = 0;
+                    if (sscanf(line, "GAME_MODE %63s %d", mode_name, &time_limit) >= 1) {
+                        printf("\n>>> Game Mode: %s", mode_name);
+                        if (time_limit > 0) {
+                            printf(" (%d seconds)", time_limit);
+                        }
+                        printf(" <<<\n");
+                    }
                 } else if (strncmp(line, "COUNTDOWN", 9) == 0) {
                     int count = 0;
                     if (sscanf(line, "COUNTDOWN %d", &count) == 1) {
@@ -747,11 +935,17 @@ int main(int argc, char *argv[]) {
                         fflush(stdout);
                     }
                 } else if (strncmp(line, "START_GAME", 10) == 0) {
+                    int mode = 0, time_limit = 0;
+                    sscanf(line, "START_GAME %d %d", &mode, &time_limit);
+                    
                     printf("\n\n=== GO! GO! GO! ===\n");
+                    if (time_limit > 0) {
+                        printf("=== TIME LIMIT: %d seconds ===\n", time_limit);
+                    }
                     fflush(stdout);
                     sleep(1);
                     game_started_inline = 1;
-                    tetris_game_loop(&conn);
+                    tetris_game_loop(&conn, time_limit);
                     // Clear buffer
                     char discard[BUF_SIZE];
                     while (conn_read_line_nonblock(&conn, discard, sizeof(discard)) == 1);
@@ -768,6 +962,72 @@ int main(int argc, char *argv[]) {
                 wait_for_game_start_blocking(&conn);
             }
 
+        } else if (opt == 7) {          // VIEW MATCH HISTORY
+            printf("\n========== MATCH HISTORY ==========\n");
+            FILE *f = fopen("match_history.txt", "r");
+            if (!f) {
+                printf("No match history found yet.\n");
+            } else {
+                char buf[256];
+                int count = 0;
+                while (fgets(buf, sizeof(buf), f) != NULL) {
+                    printf("%s", buf);
+                    count++;
+                    if (count > 100) break; // Gioi han hien thi 100 dong
+                }
+                fclose(f);
+                if (count == 0) {
+                    printf("No matches recorded yet.\n");
+                }
+            }
+            printf("===================================\n");
+            
+        } else if (opt == 8) {          // VIEW PLAYER RECORDS
+            printf("\n========== PLAYER RECORDS ==========\n");
+            FILE *f = fopen("player_records.txt", "r");
+            if (!f) {
+                printf("No player records found yet.\n");
+            } else {
+                // Doc tat ca records vao array
+                typedef struct {
+                    char username[64];
+                    int score;
+                } RecordEntry;
+                RecordEntry records[128];
+                int count = 0;
+                
+                while (count < 128 && fscanf(f, "%63s %d", records[count].username, &records[count].score) == 2) {
+                    count++;
+                }
+                fclose(f);
+                
+                // Sap xep theo diem giam dan
+                for (int i = 0; i < count - 1; ++i) {
+                    for (int j = 0; j < count - i - 1; ++j) {
+                        if (records[j].score < records[j+1].score) {
+                            RecordEntry tmp = records[j];
+                            records[j] = records[j+1];
+                            records[j+1] = tmp;
+                        }
+                    }
+                }
+                
+                // Hien thi top 20
+                printf("TOP PLAYERS (Best Scores):\n");
+                printf("------------------------------------\n");
+                int display_count = count < 20 ? count : 20;
+                for (int i = 0; i < display_count; ++i) {
+                    printf("#%d: %-20s %d points\n", i+1, records[i].username, records[i].score);
+                }
+                
+                if (count == 0) {
+                    printf("No records yet.\n");
+                } else if (count > 20) {
+                    printf("... and %d more players\n", count - 20);
+                }
+            }
+            printf("====================================\n");
+            
         } else {
             printf("Unknown option.\n");
         }
