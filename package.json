@@ -1,0 +1,22 @@
+{
+  "name": "tetris-online-websocket-proxy",
+  "version": "1.0.0",
+  "description": "WebSocket proxy server for Tetris Online game",
+  "main": "websocket-proxy.js",
+  "scripts": {
+    "start": "node websocket-proxy.js",
+    "http": "node http-server.js",
+    "proxy": "node websocket-proxy.js"
+  },
+  "dependencies": {
+    "ws": "^8.14.2"
+  },
+  "keywords": [
+    "tetris",
+    "websocket",
+    "proxy"
+  ],
+  "author": "",
+  "license": "MIT"
+}
+
