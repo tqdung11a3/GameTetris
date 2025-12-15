@@ -1,5 +1,5 @@
 // Game Logic và UI Handlers
-// Lưu ý: websocket-client.js phải được load trước file này
+
 
 // Tetris Game Constants
 const BOARD_WIDTH = 10;
@@ -80,7 +80,8 @@ let gameState = {
     gameStarted: false,
     gameOver: false,
     dropInterval: 500,
-    lastDropTime: 0
+    lastDropTime: 0,
+    startTime: 0  // Thời gian bắt đầu game
 };
 
 let currentUsername = '';
@@ -285,6 +286,7 @@ function initGame() {
     gameState.score = 0;
     gameState.gameOver = false;
     gameState.lastDropTime = Date.now();
+    gameState.startTime = Date.now();  // Lưu thời gian bắt đầu game
     spawnPiece();
     updateScore();
     draw();
@@ -511,7 +513,8 @@ function gameLoop() {
     }
     
     if (gameState.timeLimit > 0) {
-        const elapsed = Math.floor((Date.now() - gameState.lastDropTime) / 1000);
+        // Tính thời gian đã trôi qua từ khi bắt đầu game
+        const elapsed = Math.floor((Date.now() - gameState.startTime) / 1000);
         gameState.timeLeft = Math.max(0, gameState.timeLimit - elapsed);
         updateTime();
         if (gameState.timeLeft <= 0) {
@@ -649,6 +652,7 @@ function setupWebSocketHandlers() {
         } else if (cmd === 'START_GAME') {
             gameState.timeLimit = parseInt(parts[2]) || 0;
             gameState.timeLeft = gameState.timeLimit;
+            gameState.startTime = Date.now();  // Đặt thời gian bắt đầu
             gameState.gameStarted = true;
             
             const lobbyPanel = document.getElementById('lobby-panel');
