@@ -862,6 +862,75 @@ static void handle_command(int cindex, char *line) {
         
         send_to_client(cindex, "GAME_END_OK\n");
 
+    } else if (strcmp(cmd, "VIEW_HISTORY") == 0) {
+        // Gửi lịch sử trận đấu
+        FILE *f = fopen(MATCH_HISTORY_FILE, "r");
+        if (!f) {
+            send_to_client(cindex, "HISTORY_BEGIN\n");
+            send_to_client(cindex, "HISTORY_END\n");
+            return;
+        }
+        
+        send_to_client(cindex, "HISTORY_BEGIN\n");
+        char buf[512];
+        int line_count = 0;
+        while (fgets(buf, sizeof(buf), f) != NULL && line_count < 200) {
+            // Gửi từng dòng, thay \n bằng | để tránh conflict với protocol
+            size_t len = strlen(buf);
+            if (len > 0 && buf[len-1] == '\n') {
+                buf[len-1] = '\0';
+            }
+            char line[520];
+            snprintf(line, sizeof(line), "HISTORY_LINE %s\n", buf);
+            send_to_client(cindex, line);
+            line_count++;
+        }
+        fclose(f);
+        send_to_client(cindex, "HISTORY_END\n");
+
+    } else if (strcmp(cmd, "VIEW_RECORDS") == 0) {
+        // Gửi kỷ lục người chơi
+        FILE *f = fopen(PLAYER_RECORDS_FILE, "r");
+        if (!f) {
+            send_to_client(cindex, "RECORDS_BEGIN\n");
+            send_to_client(cindex, "RECORDS_END\n");
+            return;
+        }
+        
+        // Đọc tất cả records vào array
+        typedef struct {
+            char username[USERNAME_LEN];
+            int score;
+        } RecordEntry;
+        RecordEntry records[128];
+        int count = 0;
+        
+        while (count < 128 && fscanf(f, "%31s %d", records[count].username, &records[count].score) == 2) {
+            count++;
+        }
+        fclose(f);
+        
+        // Sắp xếp theo điểm giảm dần
+        for (int i = 0; i < count - 1; ++i) {
+            for (int j = 0; j < count - i - 1; ++j) {
+                if (records[j].score < records[j+1].score) {
+                    RecordEntry tmp = records[j];
+                    records[j] = records[j+1];
+                    records[j+1] = tmp;
+                }
+            }
+        }
+        
+        // Gửi kết quả
+        send_to_client(cindex, "RECORDS_BEGIN\n");
+        int display_count = count < 50 ? count : 50; // Top 50
+        for (int i = 0; i < display_count; ++i) {
+            char line[128];
+            snprintf(line, sizeof(line), "RECORD %s %d\n", records[i].username, records[i].score);
+            send_to_client(cindex, line);
+        }
+        send_to_client(cindex, "RECORDS_END\n");
+
     } else {
         send_to_client(cindex, "ERROR Unknown_command\n");
     }

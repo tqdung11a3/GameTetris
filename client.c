@@ -367,36 +367,93 @@ static int board_clear_lines() {
 /* ve bang + khoi hien tai + scoreboard */
 static void draw_board(const Piece *p, int score, const char *scoreboard_text, int time_left, int time_limit) {
     printf("\033[H\033[J"); // clear screen
-    printf("TETRIS ONLINE - controls: a=left, d=right, s=down, w=rotate, q=quit\n");
-    printf("Your score: %d", score);
+    
+    // Header với màu sắc
+    printf("\033[1;36m╔════════════════════════════════════════════════════════════╗\033[0m\n");
+    printf("\033[1;36m║\033[0m  \033[1;33m🎮 TETRIS ONLINE 🎮\033[0m                                    \033[1;36m║\033[0m\n");
+    printf("\033[1;36m╠════════════════════════════════════════════════════════════╣\033[0m\n");
+    printf("\033[1;36m║\033[0m  \033[1;32mScore:\033[0m \033[1;37m%-10d\033[0m", score);
     if (time_limit > 0) {
-        printf(" | Time left: %d/%d sec", time_left, time_limit);
+        printf("  \033[1;31m⏱ Time:\033[0m \033[1;37m%3d/%3d sec\033[0m", time_left, time_limit);
     }
-    printf("\n");
-    printf("--------------------------------\n");
-
+    printf("                    \033[1;36m║\033[0m\n");
+    printf("\033[1;36m║\033[0m  \033[1;35mControls:\033[0m \033[0;37ma=←  d=→  s=↓  w=↻  q=quit\033[0m              \033[1;36m║\033[0m\n");
+    printf("\033[1;36m╠════════════════════════════════════════════════════════════╣\033[0m\n");
+    
+    // Vẽ board với border đẹp
+    printf("\033[1;36m║\033[0m  \033[1;37m┌");
+    for (int x = 0; x < BOARD_W; ++x) printf("──");
+    printf("┐\033[0m  \033[1;36m║\033[0m\n");
+    
     for (int y = 0; y < BOARD_H; ++y) {
-        printf("|");
+        printf("\033[1;36m║\033[0m  \033[1;37m│\033[0m");
         for (int x = 0; x < BOARD_W; ++x) {
             int filled = board[y][x];
+            int is_current_piece = 0;
             if (p) {
                 for (int py = 0; py < 4; ++py) {
                     for (int px = 0; px < 4; ++px) {
                         if (tetrominoes[p->shape][p->rot][py][px]) {
                             int bx = p->x + px;
                             int by = p->y + py;
-                            if (bx == x && by == y) filled = 1;
+                            if (bx == x && by == y) {
+                                filled = 1;
+                                is_current_piece = 1;
+                            }
                         }
                     }
                 }
             }
-            printf(filled ? "[]" : "  ");
+            
+            if (filled) {
+                if (is_current_piece) {
+                    // Màu sáng cho khối đang rơi
+                    printf("\033[1;43m  \033[0m"); // Nền vàng sáng
+                } else {
+                    // Màu cho khối đã đặt
+                    int color = (y + x) % 6 + 1; // Màu thay đổi theo vị trí
+                    printf("\033[1;4%dm██\033[0m", color);
+                }
+            } else {
+                printf("  ");
+            }
         }
-        printf("|\n");
+        printf("\033[1;37m│\033[0m  \033[1;36m║\033[0m\n");
     }
-    printf("--------------------------------\n");
-    printf("LEADERBOARD (Room):\n");
-    printf("%s\n", scoreboard_text ? scoreboard_text : "(waiting for scores...)");
+    
+    printf("\033[1;36m║\033[0m  \033[1;37m└");
+    for (int x = 0; x < BOARD_W; ++x) printf("──");
+    printf("┘\033[0m  \033[1;36m║\033[0m\n");
+    printf("\033[1;36m╠════════════════════════════════════════════════════════════╣\033[0m\n");
+    
+    // Leaderboard
+    printf("\033[1;36m║\033[0m  \033[1;33m🏆 LEADERBOARD (Room)\033[0m                              \033[1;36m║\033[0m\n");
+    printf("\033[1;36m║\033[0m  ");
+    if (scoreboard_text && strlen(scoreboard_text) > 0) {
+        // In từng dòng của scoreboard với màu
+        char text_copy[512];
+        strncpy(text_copy, scoreboard_text, sizeof(text_copy) - 1);
+        text_copy[sizeof(text_copy) - 1] = '\0';
+        char *line = strtok(text_copy, "\n");
+        int first_line = 1;
+        while (line) {
+            if (!first_line) printf("\033[1;36m║\033[0m  ");
+            printf("\033[0;37m%s\033[0m", line);
+            int padding = 50 - strlen(line);
+            if (padding > 0) {
+                for (int i = 0; i < padding; i++) printf(" ");
+            }
+            printf("  \033[1;36m║\033[0m\n");
+            line = strtok(NULL, "\n");
+            first_line = 0;
+        }
+    } else {
+        printf("\033[0;37m(waiting for scores...)\033[0m");
+        int padding = 50 - 23;
+        for (int i = 0; i < padding; i++) printf(" ");
+        printf("  \033[1;36m║\033[0m\n");
+    }
+    printf("\033[1;36m╚════════════════════════════════════════════════════════════╝\033[0m\n");
     fflush(stdout);
 }
 
@@ -562,9 +619,13 @@ static void tetris_game_loop(Conn *conn, int time_limit) {
                     }
                     score += points;
                     
-                    // Hien thi thong bao tam thoi
-                    printf("\n\033[1;33m>>> %s +%d points! <<<\033[0m\n", line_name, points);
+                    // Hien thi thong bao tam thoi với hiệu ứng
+                    printf("\n\033[1;33m╔════════════════════════════════════════════════════════════╗\033[0m\n");
+                    printf("\033[1;33m║\033[0m                    \033[1;32m%s\033[0m                    \033[1;33m║\033[0m\n", line_name);
+                    printf("\033[1;33m║\033[0m                  \033[1;37m+%d points!\033[0m                  \033[1;33m║\033[0m\n", points);
+                    printf("\033[1;33m╚════════════════════════════════════════════════════════════╝\033[0m\n");
                     fflush(stdout);
+                    usleep(500000); // Hiển thị 0.5 giây
                     
                     char cmd[64];
                     snprintf(cmd, sizeof(cmd), "GAME_SCORE %d", score);
@@ -751,21 +812,25 @@ static void wait_for_game_start_blocking(Conn *conn) {
 /* --------------------- menu lobby (console) --------------------- */
 
 static void print_menu(int in_room) {
-    printf("\n==== TETRIS ONLINE CLIENT ====\n");
-    printf("1. Register\n");
-    printf("2. Login\n");
-    printf("3. List rooms\n");
-    printf("4. Create room\n");
-    printf("5. Join room\n");
+    printf("\n");
+    printf("\033[1;36m╔════════════════════════════════════════════════════════════╗\033[0m\n");
+    printf("\033[1;36m║\033[0m                    \033[1;33m🎮 TETRIS ONLINE 🎮\033[0m                    \033[1;36m║\033[0m\n");
+    printf("\033[1;36m╠════════════════════════════════════════════════════════════╣\033[0m\n");
+    printf("\033[1;36m║\033[0m  \033[1;32m1.\033[0m \033[0;37mRegister\033[0m                                          \033[1;36m║\033[0m\n");
+    printf("\033[1;36m║\033[0m  \033[1;32m2.\033[0m \033[0;37mLogin\033[0m                                             \033[1;36m║\033[0m\n");
+    printf("\033[1;36m║\033[0m  \033[1;32m3.\033[0m \033[0;37mList rooms\033[0m                                        \033[1;36m║\033[0m\n");
+    printf("\033[1;36m║\033[0m  \033[1;32m4.\033[0m \033[0;37mCreate room\033[0m                                       \033[1;36m║\033[0m\n");
+    printf("\033[1;36m║\033[0m  \033[1;32m5.\033[0m \033[0;37mJoin room\033[0m                                         \033[1;36m║\033[0m\n");
     if (in_room) {
-        printf("6. Ready (start game when all ready)\n");
+        printf("\033[1;36m║\033[0m  \033[1;32m6.\033[0m \033[1;33m✅ Ready\033[0m \033[0;37m(start game when all ready)\033[0m              \033[1;36m║\033[0m\n");
     } else {
-        printf("6. (Must be in a room first)\n");
+        printf("\033[1;36m║\033[0m  \033[1;32m6.\033[0m \033[0;30m(Must be in a room first)\033[0m                      \033[1;36m║\033[0m\n");
     }
-    printf("7. View Match History\n");
-    printf("8. View Player Records\n");
-    printf("0. Exit\n");
-    printf("Select: ");
+    printf("\033[1;36m║\033[0m  \033[1;32m7.\033[0m \033[0;37mView Match History\033[0m                                \033[1;36m║\033[0m\n");
+    printf("\033[1;36m║\033[0m  \033[1;32m8.\033[0m \033[0;37mView Player Records\033[0m                               \033[1;36m║\033[0m\n");
+    printf("\033[1;36m║\033[0m  \033[1;31m0.\033[0m \033[0;37mExit\033[0m                                              \033[1;36m║\033[0m\n");
+    printf("\033[1;36m╚════════════════════════════════════════════════════════════╝\033[0m\n");
+    printf("\033[1;33mSelect:\033[0m ");
     fflush(stdout);
 }
 

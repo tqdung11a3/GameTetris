@@ -1,0 +1,27 @@
+# Node.js
+node_modules/
+npm-debug.log
+package-lock.json
+
+# Compiled binaries
+client
+server
+*.o
+*.exe
+
+# Data files (optional - uncomment if you don't want to track these)
+# accounts.txt
+# match_history.txt
+# player_records.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+

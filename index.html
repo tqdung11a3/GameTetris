@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🎮 Tetris Online</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <h1>🎮 TETRIS ONLINE</h1>
+            <div class="status-bar">
+                <div class="status-item">
+                    <span class="label">Score:</span>
+                    <span id="score" class="value">0</span>
+                </div>
+                <div class="status-item" id="time-container" style="display: none;">
+                    <span class="label">⏱ Time:</span>
+                    <span id="time-left" class="value">0</span>
+                    <span class="label">/</span>
+                    <span id="time-limit" class="value">0</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Status:</span>
+                    <span id="connection-status" class="value disconnected">Disconnected</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <!-- Login/Register Panel -->
+            <div id="auth-panel" class="panel">
+                <div class="auth-container">
+                    <h2>Đăng Nhập / Đăng Ký</h2>
+                    <div class="auth-tabs">
+                        <button class="tab-btn active" onclick="switchTab('login')">Đăng Nhập</button>
+                        <button class="tab-btn" onclick="switchTab('register')">Đăng Ký</button>
+                    </div>
+                    <div id="login-form" class="auth-form">
+                        <input type="text" id="login-username" placeholder="Username" />
+                        <input type="password" id="login-password" placeholder="Password" />
+                        <button onclick="handleLogin()">Đăng Nhập</button>
+                    </div>
+                    <div id="register-form" class="auth-form" style="display: none;">
+                        <input type="text" id="register-username" placeholder="Username" />
+                        <input type="password" id="register-password" placeholder="Password" />
+                        <button onclick="handleRegister()">Đăng Ký</button>
+                    </div>
+                    <div id="auth-message" class="message"></div>
+                </div>
+            </div>
+
+            <!-- Lobby Panel -->
+            <div id="lobby-panel" class="panel" style="display: none;">
+                <div class="lobby-header">
+                    <h2>Lobby</h2>
+                    <div class="user-info">
+                        <span class="username-display">👤 <span id="current-username-display"></span></span>
+                        <button onclick="handleLogout()" class="logout-btn">🚪 Đăng Xuất</button>
+                    </div>
+                </div>
+                <div class="lobby-controls">
+                    <button onclick="listRooms()">📋 Danh Sách Phòng</button>
+                    <button onclick="createRoom()">➕ Tạo Phòng</button>
+                    <button onclick="viewHistory()">📜 Lịch Sử</button>
+                    <button onclick="viewRecords()">🏆 Kỷ Lục</button>
+                </div>
+                <div id="rooms-list" class="rooms-list"></div>
+                <div id="room-info" class="room-info" style="display: none;">
+                    <h3>Phòng: <span id="room-id"></span></h3>
+                    <div id="players-list" class="players-list"></div>
+                    <div class="room-controls">
+                        <button id="ready-btn" onclick="toggleReady()">✅ Ready</button>
+                        <button onclick="leaveRoom()">🚪 Rời Phòng</button>
+                    </div>
+                    <div id="mode-selector" class="mode-selector" style="display: none;">
+                        <h4>Chọn Chế Độ Chơi:</h4>
+                        <button onclick="selectMode(0)">SURVIVAL</button>
+                        <button onclick="selectMode(1)">TIME ATTACK 60s</button>
+                        <button onclick="selectMode(2)">TIME ATTACK 180s</button>
+                        <button onclick="selectMode(3)">TIME ATTACK 300s</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Game Panel -->
+            <div id="game-panel" class="panel" style="display: none;">
+                <div class="game-container">
+                    <div class="game-left">
+                        <canvas id="game-board" width="300" height="600"></canvas>
+                        <div class="game-controls-hint">
+                            <p>Điều khiển: ← → (di chuyển), ↓ (rơi nhanh), ↑ (xoay), Q (thoát)</p>
+                        </div>
+                    </div>
+                    <div class="game-right">
+                        <div class="leaderboard">
+                            <h3>🏆 Bảng Xếp Hạng</h3>
+                            <div id="leaderboard-content" class="leaderboard-content">
+                                <p class="waiting">Đang chờ điểm số...</p>
+                            </div>
+                        </div>
+                        <div class="next-piece">
+                            <h3>Tiếp Theo</h3>
+                            <canvas id="next-piece-canvas" width="120" height="120"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Game Over Panel -->
+            <div id="gameover-panel" class="panel" style="display: none;">
+                <div class="gameover-content">
+                    <h2>🎉 Kết Quả Trận Đấu</h2>
+                    <div class="final-score">
+                        <p>Điểm của bạn: <span id="final-score" class="score-value">0</span></p>
+                    </div>
+                    <div id="final-results" class="final-results"></div>
+                    <button onclick="returnToLobby()">Quay Lại Lobby</button>
+                </div>
+            </div>
+        </div>
+
+            <!-- Messages -->
+            <div id="message-container" class="message-container"></div>
+        </div>
+
+        <!-- History Modal -->
+        <div id="history-modal" class="modal" style="display: none;">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>📜 Lịch Sử Trận Đấu</h2>
+                    <span class="close" onclick="closeModal('history-modal')">&times;</span>
+                </div>
+                <div class="modal-body">
+                    <div id="history-content"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Records Modal -->
+        <div id="records-modal" class="modal" style="display: none;">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>🏆 Kỷ Lục Người Chơi</h2>
+                    <span class="close" onclick="closeModal('records-modal')">&times;</span>
+                </div>
+                <div class="modal-body">
+                    <div id="records-content"></div>
+                </div>
+            </div>
+        </div>
+
+    <script src="websocket-client.js"></script>
+    <script src="game.js"></script>
+</body>
+</html>
+
