@@ -527,17 +527,11 @@ static void handle_command(int cindex, char *line) {
         r->ready[pos] = 1;
         
         // Kiem tra xem day co phai nguoi ready dau tien khong
-        if (ready_count_before == 0 && r->num_players > 1) {
-            // Nguoi ready dau tien chon game mode
+        if (ready_count_before == 0) {
+            // Nguoi ready dau tien (du la solo hay multiplayer) chon game mode
             r->mode_chooser = cindex;  // Luu nguoi duoc phep chon mode
             send_to_client(cindex, "CHOOSE_MODE\n");
         } else {
-            // Neu chi co 1 nguoi, tu dong set survival mode
-            if (r->num_players == 1 && !r->mode_selected) {
-                r->game_mode = 0;
-                r->time_limit = 0;
-                r->mode_selected = 1;
-            }
             send_to_client(cindex, "READY_OK\n");
         }
         
@@ -565,11 +559,8 @@ static void handle_command(int cindex, char *line) {
         
         // Dieu kien bat dau game:
         // - Tat ca ready
-        // - VA mode da duoc chon (neu co >1 nguoi)
-        int can_start = all_ready && r->num_players > 0 && !r->game_started;
-        if (r->num_players > 1) {
-            can_start = can_start && r->mode_selected;
-        }
+        // - VA mode da duoc chon (bat buoc cho ca solo va multiplayer)
+        int can_start = all_ready && r->num_players > 0 && !r->game_started && r->mode_selected;
         
         if (can_start) {
             r->playing = 1;

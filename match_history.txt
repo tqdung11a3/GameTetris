@@ -11,3 +11,28 @@
 === Match Room 1 - 2025-12-14 21:48:21 ===
 #1: dung - 0 points [WINNER]
 
+=== Match Room 1 - 2025-12-15 10:23:14 ===
+#1: dung - 2100 points [WINNER]
+
+=== Match Room 1 - 2025-12-15 10:31:16 ===
+#1: giang - 0 points [WINNER]
+#2: dung - 0 points
+
+=== Match Room 1 - 2025-12-15 10:34:35 ===
+#1: dung - 300 points [WINNER]
+#2: giang - 100 points
+
+=== Match Room 2 - 2025-12-15 10:37:05 ===
+#1: giang - 0 points [WINNER]
+
+=== Match Room 1 - 2025-12-15 10:37:15 ===
+#1: dung - 0 points [WINNER]
+
+=== Match Room 4 - 2025-12-15 10:40:32 ===
+#1: giang - 100 points [WINNER]
+#2: dung - 100 points
+
+=== Match Room 1 - 2025-12-15 13:06:26 ===
+#1: dung - 0 points [WINNER]
+#2: giang - 0 points
+
