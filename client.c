@@ -364,19 +364,19 @@ static int board_clear_lines() {
     return lines;
 }
 
-/* ve bang + khoi hien tai + scoreboard */
-static void draw_board(const Piece *p, int score, const char *scoreboard_text, int time_left, int time_limit) {
+/* ve bang + khoi hien tai + next piece + scoreboard */
+static void draw_board(const Piece *p, const Piece *next_p, int score, int level, const char *scoreboard_text, int time_left, int time_limit) {
     printf("\033[H\033[J"); // clear screen
     
     // Header với màu sắc
     printf("\033[1;36m╔════════════════════════════════════════════════════════════╗\033[0m\n");
     printf("\033[1;36m║\033[0m  \033[1;33m🎮 TETRIS ONLINE 🎮\033[0m                                    \033[1;36m║\033[0m\n");
     printf("\033[1;36m╠════════════════════════════════════════════════════════════╣\033[0m\n");
-    printf("\033[1;36m║\033[0m  \033[1;32mScore:\033[0m \033[1;37m%-10d\033[0m", score);
+    printf("\033[1;36m║\033[0m  \033[1;32mScore:\033[0m \033[1;37m%-10d\033[0m  \033[1;34mLevel:\033[0m \033[1;37m%-3d\033[0m", score, level);
     if (time_limit > 0) {
         printf("  \033[1;31m⏱ Time:\033[0m \033[1;37m%3d/%3d sec\033[0m", time_left, time_limit);
     }
-    printf("                    \033[1;36m║\033[0m\n");
+    printf("        \033[1;36m║\033[0m\n");
     printf("\033[1;36m║\033[0m  \033[1;35mControls:\033[0m \033[0;37ma=←  d=→  s=↓  w=↻  q=quit\033[0m              \033[1;36m║\033[0m\n");
     printf("\033[1;36m╠════════════════════════════════════════════════════════════╣\033[0m\n");
     
@@ -425,6 +425,26 @@ static void draw_board(const Piece *p, int score, const char *scoreboard_text, i
     for (int x = 0; x < BOARD_W; ++x) printf("──");
     printf("┘\033[0m  \033[1;36m║\033[0m\n");
     printf("\033[1;36m╠════════════════════════════════════════════════════════════╣\033[0m\n");
+    
+    // Next Piece
+    if (next_p) {
+        printf("\033[1;36m║\033[0m  \033[1;35mNext:\033[0m ");
+        // Ve next piece (4x4 grid)
+        for (int py = 0; py < 4; ++py) {
+            for (int px = 0; px < 4; ++px) {
+                if (tetrominoes[next_p->shape][0][py][px]) {
+                    printf("\033[1;43m██\033[0m");
+                } else {
+                    printf("  ");
+                }
+            }
+            if (py < 3) {
+                printf("\033[1;36m║\033[0m\n\033[1;36m║\033[0m        ");
+            }
+        }
+        printf("                    \033[1;36m║\033[0m\n");
+        printf("\033[1;36m╠════════════════════════════════════════════════════════════╣\033[0m\n");
+    }
     
     // Leaderboard
     printf("\033[1;36m║\033[0m  \033[1;33m🏆 LEADERBOARD (Room)\033[0m                              \033[1;36m║\033[0m\n");
@@ -478,13 +498,11 @@ static void tetris_game_loop(Conn *conn, int time_limit) {
     board_clear();
     srand((unsigned)time(NULL));
 
-    Piece cur;
-    cur.shape = rand() % 7;
-    cur.rot   = 0;
-    cur.x     = BOARD_W/2 - 2;
-    cur.y     = 0;
 
     int score = 0;
+    int level = 1;              // Level bat dau tu 1
+    int total_lines_cleared = 0; // Tong so hang da xoa
+    int drop_interval = 500;     // Toc do roi ban dau (ms)
     char scoreboard_text[512] = "";
 
     /* chuyen stdin sang che do doc tung ky tu, khong echo */
@@ -494,6 +512,16 @@ static void tetris_game_loop(Conn *conn, int time_limit) {
     long last_drop = 0;
     long start_time = 0;
     struct timespec ts;
+
+    // Khoi tao khối đầu tiên và khối tiếp theo
+    Piece cur;
+    Piece next;
+    cur.shape = rand() % 7;
+    cur.rot   = 0;
+    cur.x     = BOARD_W/2 - 2;
+    cur.y     = 0;
+    next.shape = rand() % 7;
+    next.rot   = 0;
 
     while (!game_over) {
         clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -581,10 +609,10 @@ static void tetris_game_loop(Conn *conn, int time_limit) {
             if (piece_fits(&cur, cur.x, cur.y, nrot)) cur.rot = nrot;
         }
 
-        /* roi xuong theo thoi gian */
+        /* roi xuong theo thoi gian - toc do tang dan theo level */
         clock_gettime(CLOCK_MONOTONIC, &ts);
         now_ms = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-        if (now_ms - last_drop >= 500) { // 500ms roi 1 o
+        if (now_ms - last_drop >= drop_interval) {
             if (piece_fits(&cur, cur.x, cur.y+1, cur.rot)) {
                 cur.y++;
             } else {
@@ -592,6 +620,24 @@ static void tetris_game_loop(Conn *conn, int time_limit) {
                 piece_lock(&cur);
                 int lines = board_clear_lines();
                 if (lines > 0) {
+                    // Cap nhat tong so hang da xoa va level (tang level moi 5 hang de ro rang hon)
+                    total_lines_cleared += lines;
+                    int new_level = (total_lines_cleared / 5) + 1;
+                    if (new_level > level) {
+                        level = new_level;
+                        // Tinh toan toc do roi moi: giam 20ms moi level, toi thieu 50ms
+                        drop_interval = 500 - (level - 1) * 20;
+                        if (drop_interval < 50) drop_interval = 50;
+                        
+                        // Hien thi thong bao level up
+                        printf("\n\033[1;35m╔════════════════════════════════════════════════════════════╗\033[0m\n");
+                        printf("\033[1;35m║\033[0m              \033[1;33m🚀 LEVEL UP! LEVEL %d 🚀\033[0m              \033[1;35m║\033[0m\n", level);
+                        printf("\033[1;35m║\033[0m         \033[1;37mTốc độ rơi tăng! (%dms/ô)\033[0m         \033[1;35m║\033[0m\n", drop_interval);
+                        printf("\033[1;35m╚════════════════════════════════════════════════════════════╝\033[0m\n");
+                        fflush(stdout);
+                        usleep(800000); // Hien thi 0.8 giay
+                    }
+                    
                     // He thong diem Tetris goc: an nhieu hang cung luc = nhieu diem hon
                     int points = 0;
                     const char *line_name = "";
@@ -631,15 +677,17 @@ static void tetris_game_loop(Conn *conn, int time_limit) {
                     snprintf(cmd, sizeof(cmd), "GAME_SCORE %d", score);
                     conn_send_line(conn, cmd); // gui diem len server
                 }
-                Piece next;
+                // Su dung next piece da co lam current piece
+                cur = next;
+                cur.x = BOARD_W/2 - 2;
+                cur.y = 0;
+                cur.rot = 0;
+                // Tao next piece moi
                 next.shape = rand() % 7;
-                next.rot   = 0;
-                next.x     = BOARD_W/2 - 2;
-                next.y     = 0;
-                if (!piece_fits(&next, next.x, next.y, next.rot)) {
+                next.rot = 0;
+                if (!piece_fits(&cur, cur.x, cur.y, cur.rot)) {
                     game_over = 1; // khong con cho: thua
                 }
-                cur = next;
             }
             last_drop = now_ms;
         }
@@ -652,7 +700,7 @@ static void tetris_game_loop(Conn *conn, int time_limit) {
             if (time_left < 0) time_left = 0;
         }
         
-        draw_board(&cur, score, scoreboard_text, time_left, time_limit);
+        draw_board(&cur, &next, score, level, scoreboard_text, time_left, time_limit);
     }
 
     system("stty sane");

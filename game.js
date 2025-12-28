@@ -75,6 +75,8 @@ let gameState = {
     currentPiece: null,
     nextPiece: null,
     score: 0,
+    level: 1,                    // Level bắt đầu từ 1
+    totalLinesCleared: 0,       // Tổng số hàng đã xóa
     timeLimit: 0,
     timeLeft: 0,
     gameStarted: false,
@@ -284,11 +286,15 @@ function returnToLobby() {
 function initGame() {
     gameState.board = Array(BOARD_HEIGHT).fill().map(() => Array(BOARD_WIDTH).fill(0));
     gameState.score = 0;
+    gameState.level = 1;
+    gameState.totalLinesCleared = 0;
+    gameState.dropInterval = 500;
     gameState.gameOver = false;
     gameState.lastDropTime = Date.now();
     gameState.startTime = Date.now();  // Lưu thời gian bắt đầu game
     spawnPiece();
     updateScore();
+    updateLevel();
     draw();
 }
 
@@ -358,6 +364,18 @@ function clearLines() {
     }
     
     if (linesCleared > 0) {
+                    // Cập nhật tổng số hàng đã xóa và level (tăng level mỗi 5 hàng để rõ ràng hơn)
+                    gameState.totalLinesCleared += linesCleared;
+                    const newLevel = Math.floor(gameState.totalLinesCleared / 5) + 1;
+        if (newLevel > gameState.level) {
+            gameState.level = newLevel;
+            // Tính toán tốc độ rơi mới: giảm 20ms mỗi level, tối thiểu 50ms
+            gameState.dropInterval = 500 - (gameState.level - 1) * 20;
+            if (gameState.dropInterval < 50) gameState.dropInterval = 50;
+            updateLevel();
+            showMessage(`🚀 LEVEL UP! LEVEL ${gameState.level} - Tốc độ rơi: ${gameState.dropInterval}ms/ô`, 'success');
+        }
+        
         let points = 0;
         switch(linesCleared) {
             case 1: points = 100; break;
@@ -379,7 +397,33 @@ function dropPiece() {
     } else {
         lockPiece();
         clearLines();
-        spawnPiece();
+        // Sử dụng next piece đã có làm current piece
+        if (gameState.nextPiece) {
+            gameState.currentPiece = {
+                shape: gameState.nextPiece.shape,
+                rotation: 0,
+                x: Math.floor(BOARD_WIDTH / 2) - 2,
+                y: 0
+            };
+        } else {
+            // Fallback: tạo khối mới nếu không có next piece
+            gameState.currentPiece = {
+                shape: Math.floor(Math.random() * 7),
+                rotation: 0,
+                x: Math.floor(BOARD_WIDTH / 2) - 2,
+                y: 0
+            };
+        }
+        // Tạo next piece mới
+        gameState.nextPiece = {
+            shape: Math.floor(Math.random() * 7),
+            rotation: 0
+        };
+        // Kiểm tra game over
+        if (!pieceFits(gameState.currentPiece)) {
+            gameState.gameOver = true;
+            endGame();
+        }
     }
 }
 
@@ -464,6 +508,10 @@ function drawCell(ctx, x, y, color, isCurrent = false) {
 
 function updateScore() {
     document.getElementById('score').textContent = gameState.score;
+}
+
+function updateLevel() {
+    document.getElementById('level').textContent = gameState.level;
 }
 
 function updateTime() {

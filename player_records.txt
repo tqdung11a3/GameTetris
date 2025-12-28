@@ -1,2 +1,2 @@
-giang 200
+giang 1000
 dung 2100
