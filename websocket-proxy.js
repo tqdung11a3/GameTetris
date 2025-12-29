@@ -9,8 +9,11 @@ const WS_PORT = 8080;
 const TCP_SERVER_HOST = 'localhost';
 const TCP_SERVER_PORT = 5555;
 
-// Tạo WebSocket server
-const wss = new WebSocket.Server({ port: WS_PORT });
+// Tạo WebSocket server - bind với 0.0.0.0 để nhận connection từ mọi IP
+const wss = new WebSocket.Server({ 
+    port: WS_PORT,
+    host: '0.0.0.0'  // ⭐ Cho phép kết nối từ mọi IP
+});
 
 console.log(`WebSocket Proxy Server đang chạy trên port ${WS_PORT}`);
 console.log(`Kết nối đến TCP server tại ${TCP_SERVER_HOST}:${TCP_SERVER_PORT}`);

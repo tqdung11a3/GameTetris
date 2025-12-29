@@ -4,6 +4,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
 const PORT = 3000;
 const MIME_TYPES = {
@@ -46,13 +47,33 @@ const server = http.createServer((req, res) => {
     });
 });
 
-server.listen(PORT, () => {
+// Lấy IP thực tế của máy (không phải localhost)
+function getLocalIP() {
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+        for (const iface of interfaces[name]) {
+            // Bỏ qua internal (localhost) và non-IPv4
+            if (iface.family === 'IPv4' && !iface.internal) {
+                return iface.address;
+            }
+        }
+    }
+    return 'localhost';
+}
+
+const HOST = '0.0.0.0'; // Bind với mọi interface để nhận connection từ mọi IP
+const localIP = getLocalIP();
+
+server.listen(PORT, HOST, () => {
     console.log('='.repeat(50));
     console.log('🚀 HTTP Server đang chạy!');
     console.log('='.repeat(50));
     console.log(`📂 Serving files từ: ${__dirname}`);
     console.log(`🌐 Mở trình duyệt và truy cập:`);
-    console.log(`   http://localhost:${PORT}`);
+    console.log(`   Local:  http://localhost:${PORT}`);
+    console.log(`   Network: http://${localIP}:${PORT}`);
+    console.log('='.repeat(50));
+    console.log('💡 Để các máy khác kết nối, dùng địa chỉ Network ở trên');
     console.log('='.repeat(50));
     console.log('Nhấn Ctrl+C để dừng server');
     console.log('='.repeat(50));

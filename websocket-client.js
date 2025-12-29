@@ -135,10 +135,33 @@ window.addEventListener('load', () => {
         return;
     }
     
-    // Kết nối đến WebSocket proxy server
-    // Mặc định: ws://localhost:8080
-    // Có thể thay đổi bằng cách sửa URL trong file này hoặc thêm input
-    const wsUrl = localStorage.getItem('wsServerUrl') || 'ws://localhost:8080';
+    // Tự động phát hiện WebSocket URL từ URL hiện tại
+    // Nếu truy cập từ http://192.168.1.70:3000 → ws://192.168.1.70:8080
+    // Nếu truy cập từ http://localhost:3000 → ws://localhost:8080
+    function getWebSocketUrl() {
+        // Kiểm tra localStorage trước (nếu user đã set thủ công)
+        const savedUrl = localStorage.getItem('wsServerUrl');
+        if (savedUrl) {
+            return savedUrl;
+        }
+        
+        // Tự động phát hiện từ URL hiện tại
+        const hostname = window.location.hostname;
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsPort = 8080;
+        
+        // Nếu là localhost hoặc 127.0.0.1, dùng localhost
+        if (hostname === 'localhost' || hostname === '127.0.0.1') {
+            return `ws://localhost:${wsPort}`;
+        }
+        
+        // Nếu là IP thực tế, dùng IP đó
+        return `${protocol}//${hostname}:${wsPort}`;
+    }
+    
+    const wsUrl = getWebSocketUrl();
+    console.log('Connecting to WebSocket:', wsUrl);
+    
     wsClient.connect(wsUrl).catch(err => {
         console.error('Failed to connect:', err);
         showMessage('Không thể kết nối đến server. Đảm bảo WebSocket proxy server đang chạy.', 'error');
